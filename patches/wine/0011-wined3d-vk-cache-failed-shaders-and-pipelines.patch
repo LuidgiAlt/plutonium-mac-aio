@@ -1,0 +1,77 @@
+Subject: wined3d: remember Vulkan shaders and pipelines that fail to build
+Date: 2026-10-13
+Applies to: CrossOver 26.3.0 Wine sources, after 0010
+Files changed: dlls/wined3d/context_vk.c, dlls/wined3d/shader_spirv.c
+
+A shader variant that failed to compile, or a pipeline MoltenVK rejected, was
+not stored, so it was built again for every draw that used it (one BO1 shader
+about 3,200 times per session), which caused frame spikes. The failure is now
+stored as a null module or pipeline. The variant's so_desc, which the lookup
+compares, is now initialised.
+
+Review fixes (2026-10-24): failures that may pass (out of host or device
+memory, a lost device) are no longer cached; the pipeline is tried again on
+the next draw. Any other failure stays cached.
+License: LGPL-2.1-or-later, like the Wine files it modifies.
+---
+diff --git a/dlls/wined3d/context_vk.c b/dlls/wined3d/context_vk.c
+index ac89b03..0340f6a 100644
+--- a/dlls/wined3d/context_vk.c
++++ b/dlls/wined3d/context_vk.c
+@@ -3763,8 +3763,15 @@ static VkPipeline wined3d_context_vk_get_graphics_pipeline(struct wined3d_contex
+     if (vr < 0)
+     {
+         WARN("Failed to create graphics pipeline, vr %s.\n", wined3d_debug_vkresult(vr));
+-        free(pipeline_vk);
+-        return VK_NULL_HANDLE;
++        /* Out of memory or a lost device may pass: try again next time. */
++        if (vr == VK_ERROR_OUT_OF_HOST_MEMORY || vr == VK_ERROR_OUT_OF_DEVICE_MEMORY || vr == VK_ERROR_DEVICE_LOST)
++        {
++            free(pipeline_vk);
++            return VK_NULL_HANDLE;
++        }
++        /* Remember any other failure (null pipeline), so that the same
++         * pipeline is not rebuilt for every draw. */
++        pipeline_vk->vk_pipeline = VK_NULL_HANDLE;
+     }
+ 
+     if (wine_rb_put(&context_vk->graphics_pipelines, &pipeline_vk->key, &pipeline_vk->entry) == -1)
+diff --git a/dlls/wined3d/shader_spirv.c b/dlls/wined3d/shader_spirv.c
+index e0cc830..eb72b0e 100644
+--- a/dlls/wined3d/shader_spirv.c
++++ b/dlls/wined3d/shader_spirv.c
+@@ -464,7 +464,7 @@ static struct shader_spirv_graphics_program_variant_vk *shader_spirv_find_graphi
+         variant_vk = &program_vk->variants[i];
+         if (variant_vk->so_desc == so_desc && variant_vk->binding_base == binding_base
+                 && !memcmp(&variant_vk->compile_args, &args, sizeof(args)))
+-            return variant_vk;
++            return variant_vk->vk_module ? variant_vk : NULL;
+     }
+ 
+     if (!wined3d_array_reserve((void **)&program_vk->variants, &program_vk->variants_size,
+@@ -474,6 +474,7 @@ static struct shader_spirv_graphics_program_variant_vk *shader_spirv_find_graphi
+     variant_vk = &program_vk->variants[variant_count];
+     variant_vk->compile_args = args;
+     variant_vk->binding_base = binding_base;
++    variant_vk->so_desc = so_desc;
+ 
+     if (shader->source_type == VKD3D_SHADER_SOURCE_D3D_BYTECODE)
+     {
+@@ -486,12 +487,13 @@ static struct shader_spirv_graphics_program_variant_vk *shader_spirv_find_graphi
+         shader_desc.byte_code_size = shader->byte_code_size;
+     }
+ 
+-    if (!(variant_vk->vk_module = shader_spirv_compile_shader(context_vk, &shader_desc,
+-            shader->source_type, shader_type, &args, bindings, so_desc)))
+-        return NULL;
++    /* Keep failed variants too (with a null module), so that a shader that
++     * cannot be compiled is not compiled again for every draw. */
++    variant_vk->vk_module = shader_spirv_compile_shader(context_vk, &shader_desc,
++            shader->source_type, shader_type, &args, bindings, so_desc);
+     ++program_vk->variant_count;
+ 
+-    return variant_vk;
++    return variant_vk->vk_module ? variant_vk : NULL;
+ }
+ 
+ static struct shader_spirv_compute_program_vk *shader_spirv_find_compute_program_vk(struct shader_spirv_priv *priv,

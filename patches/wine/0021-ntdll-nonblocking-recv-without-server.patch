@@ -1,0 +1,243 @@
+Subject: ntdll: answer an empty receive on a nonblocking socket without the server
+Date: 2026-10-19
+Applies to: CrossOver 26.3.0 Wine sources, after 0019 (there is no 0020 in this series)
+Files changed: dlls/ntdll/unix/socket.c, dlls/ntdll/unix/server.c,
+  dlls/ntdll/unix/unix_private.h
+
+Every recv() goes to wineserver twice (recv_socket, then
+set_async_direct_result), also when the socket is nonblocking and has no
+data, where the answer is always WSAEWOULDBLOCK. Online, BO2's main thread
+polls its UDP socket that way; samples of matches with real players had it
+in sock_recv waiting for the server's reply 13-46% of the time. Matches with
+bots only and solo Zombies have no network traffic and do not stutter.
+
+ntdll now remembers the sockets the server reported as nonblocking in its
+recv_socket reply. A synchronous receive on one of them first peeks at the
+socket (recvmsg with MSG_PEEK | MSG_DONTWAIT); if that says "would block",
+the call returns STATUS_DEVICE_NOT_READY at once, as the server path would.
+Anything else (data, a zero-length datagram, a pending socket error, OOB,
+overlapped calls) goes to the server as before. A handle is forgotten when it
+is closed and on FIONBIO, WSAEventSelect, WSAAsyncSelect and shutdown.
+
+An empty recvfrom() on a 32-bit program went from 19.3 to 0.9 us. Checked:
+packets interleaved with empty polls all arrive in order, WSAEventSelect
+still reports FD_READ after an empty receive, blocking sockets still wait
+for SO_RCVTIMEO, and a socket set back to blocking blocks again.
+
+WINE_SOCK_FASTPATH=0 turns it off. WINE_SOCK_STATS=1 prints, once a second,
+how many receives took the fast path and the time spent in the server path.
+Review fixes (2026-10-24):
+- Nonblocking mode belongs to the socket, and a process can hold several
+  handles to one socket: FIONBIO, event/message select and shutdown through
+  any handle now forget every cached handle, not only that one (a duplicate
+  handle switched to blocking left the original answering WSAEWOULDBLOCK).
+- A generation counter, bumped on every forget, keeps a receive that was
+  waiting on the server from adding a handle back after it was closed (and
+  possibly reused) or its socket's mode changed.
+- Every 64th fast-path receive per handle still goes to the server, so its
+  readiness bookkeeping (FD_READ re-enabling) is never skipped for long.
+- A bad buffer takes the server path, which reports it (WSAEFAULT); the
+  statistics counters are updated atomically.
+Test: tests/src/recv-test.c (empty receives, FIONBIO on a duplicate,
+shutdown).
+License: LGPL-2.1-or-later, like the Wine files it modifies.
+---
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 1e77a4e..335ba0f 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1137,6 +1137,7 @@ static int remove_fd_from_cache( HANDLE handle )
+     unsigned int entry, idx = handle_to_index( handle, &entry );
+     int fd = -1;
+ 
++    sock_forget_handle( handle );
+     if (entry < FD_CACHE_ENTRIES && fd_cache[entry])
+     {
+         union fd_cache_entry cache;
+diff --git a/dlls/ntdll/unix/socket.c b/dlls/ntdll/unix/socket.c
+index 62b5f3a..f65beaa 100644
+--- a/dlls/ntdll/unix/socket.c
++++ b/dlls/ntdll/unix/socket.c
+@@ -912,6 +912,95 @@ static BOOL is_icmp_over_dgram( int fd )
+ #endif
+ }
+ 
++/* Sockets the server reported as nonblocking in their last recv_socket
++ * reply. A synchronous receive on such a socket with no data waiting fails
++ * with STATUS_DEVICE_NOT_READY (WSAEWOULDBLOCK) after two server round trips
++ * (recv_socket, set_async_direct_result). Games that poll a UDP socket every
++ * frame make that call thousands of times a second, so it is answered here
++ * when the socket has nothing to read. A handle leaves the list when it is
++ * closed or when an ioctl can change its nonblocking mode.
++ * WINE_SOCK_FASTPATH=0 turns this off; WINE_SOCK_STATS=1 logs counts. */
++static struct { HANDLE handle; LONG hits; } nonblocking_sockets[64];
++/* Bumped whenever entries are forgotten: a receive that started before
++ * must not add its handle back (it may have been closed and reused, or the
++ * socket's mode changed meanwhile). */
++static LONG nonblocking_gen;
++static int sock_fastpath = -1, sock_stats;
++static LONG ss_recv, ss_fast, ss_slow;
++static LONG64 ss_slow_ns, ss_slow_max_ns, ss_last;
++
++static ULONG64 ss_now(void)
++{
++    struct timespec ts;
++    clock_gettime( CLOCK_MONOTONIC, &ts );
++    return (ULONG64)ts.tv_sec * 1000000000 + ts.tv_nsec;
++}
++
++static void ss_report(void)
++{
++    LONG64 now = ss_now(), last = ss_last;
++    char buf[200];
++    int len;
++
++    if (now - last < 1000000000) return;
++    if (InterlockedCompareExchange64( &ss_last, now, last ) != last) return;
++    len = snprintf( buf, sizeof(buf), "sock-stats: %lu recv %d fast %d server %d (%lld us, longest %lld us)\n",
++                    (unsigned long)(now / 1000000), (int)ss_recv, (int)ss_fast, (int)ss_slow,
++                    (long long)ss_slow_ns / 1000, (long long)ss_slow_max_ns / 1000 );
++    write( 2, buf, len );
++    ss_recv = ss_fast = ss_slow = 0;
++    ss_slow_ns = ss_slow_max_ns = 0;
++}
++
++/* Whether a receive on handle may be answered here. Every 64th one goes to
++ * the server anyway, so that its readiness bookkeeping is never skipped for
++ * long. */
++static BOOL use_fast_path( HANDLE handle )
++{
++    unsigned int i;
++    for (i = 0; i < ARRAY_SIZE(nonblocking_sockets); i++)
++        if (nonblocking_sockets[i].handle == handle)
++            return InterlockedIncrement( &nonblocking_sockets[i].hits ) % 64 != 0;
++    return FALSE;
++}
++
++void sock_forget_handle( HANDLE handle )
++{
++    unsigned int i;
++    InterlockedIncrement( &nonblocking_gen );
++    for (i = 0; i < ARRAY_SIZE(nonblocking_sockets); i++)
++        if (nonblocking_sockets[i].handle == handle)
++            InterlockedCompareExchangePointer( &nonblocking_sockets[i].handle, NULL, handle );
++}
++
++/* Nonblocking mode belongs to the socket, and other handles may refer to the
++ * same socket: a mode change through any handle forgets them all. */
++static void sock_forget_all(void)
++{
++    unsigned int i;
++    InterlockedIncrement( &nonblocking_gen );
++    for (i = 0; i < ARRAY_SIZE(nonblocking_sockets); i++)
++        InterlockedExchangePointer( &nonblocking_sockets[i].handle, NULL );
++}
++
++static void set_nonblocking_socket( HANDLE handle, BOOL nonblocking, LONG gen )
++{
++    unsigned int i;
++
++    if (!nonblocking) { sock_forget_handle( handle ); return; }
++    if (gen != nonblocking_gen) return;
++    for (i = 0; i < ARRAY_SIZE(nonblocking_sockets); i++)
++        if (nonblocking_sockets[i].handle == handle) return;
++    for (i = 0; i < ARRAY_SIZE(nonblocking_sockets); i++)
++    {
++        if (!InterlockedCompareExchangePointer( &nonblocking_sockets[i].handle, handle, NULL ))
++        {
++            nonblocking_sockets[i].hits = 0;
++            return;
++        }
++    }
++}
++
+ static NTSTATUS sock_recv( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user, IO_STATUS_BLOCK *io,
+                            int fd, struct async_recv_ioctl *async, int force_async )
+ {
+@@ -919,6 +1008,37 @@ static NTSTATUS sock_recv( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, voi
+     BOOL nonblocking;
+     unsigned int i, status;
+     ULONG options;
++    ULONG64 t0 = 0;
++    LONG gen = nonblocking_gen;
++
++    if (sock_fastpath < 0)
++    {
++        const char *env = getenv( "WINE_SOCK_FASTPATH" );
++        sock_stats = getenv( "WINE_SOCK_STATS" ) && atoi( getenv( "WINE_SOCK_STATS" ) );
++        sock_fastpath = !env || atoi( env );
++    }
++    if (sock_stats) InterlockedIncrement( &ss_recv );
++    /* A bad buffer takes the server path, which reports it. */
++    if (sock_fastpath && !force_async && !(async->unix_flags & MSG_OOB) && async->count &&
++        virtual_check_buffer_for_write( async->iov[0].iov_base, async->iov[0].iov_len ) &&
++        use_fast_path( handle ))
++    {
++        /* poll() is slow on macOS; a peek tells the same and leaves any
++         * pending socket error to the server path */
++        char byte;
++        struct iovec iov = { &byte, 1 };
++        struct msghdr msg = { 0 };
++
++        msg.msg_iov = &iov;
++        msg.msg_iovlen = 1;
++        if (recvmsg( fd, &msg, MSG_PEEK | MSG_DONTWAIT ) < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
++        {
++            release_fileio( &async->io );
++            if (sock_stats) { InterlockedIncrement( &ss_fast ); ss_report(); }
++            return STATUS_DEVICE_NOT_READY;
++        }
++    }
++    if (sock_stats) t0 = ss_now();
+ 
+     for (i = 0; i < async->count; ++i)
+     {
+@@ -941,6 +1061,9 @@ static NTSTATUS sock_recv( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, voi
+     }
+     SERVER_END_REQ;
+ 
++    if (status == STATUS_ALERTED || status == STATUS_PENDING || status == STATUS_DEVICE_NOT_READY)
++        set_nonblocking_socket( handle, nonblocking, gen );
++
+     /* the server currently will never succeed immediately */
+     assert(status == STATUS_ALERTED || status == STATUS_PENDING || NT_ERROR(status));
+ 
+@@ -957,6 +1080,14 @@ static NTSTATUS sock_recv( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, voi
+     if (status != STATUS_PENDING)
+         release_fileio( &async->io );
+ 
++    if (t0)
++    {
++        LONG64 d = ss_now() - t0;
++        InterlockedIncrement( &ss_slow );
++        ss_slow_ns += d;
++        if (d > ss_slow_max_ns) ss_slow_max_ns = d;
++        ss_report();
++    }
+     if (wait_handle) status = wait_async( wait_handle, options & FILE_SYNCHRONOUS_IO_ALERT );
+     return status;
+ }
+@@ -1617,6 +1748,11 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
+      * fill the iosb or signal completion; such sockopts are only called
+      * synchronously by ws2_32 */
+ 
++    /* these can change the nonblocking mode (see sock_recv) */
++    if (code == IOCTL_AFD_WINE_FIONBIO || code == IOCTL_AFD_EVENT_SELECT ||
++        code == IOCTL_AFD_WINE_MESSAGE_SELECT || code == IOCTL_AFD_WINE_SHUTDOWN)
++        sock_forget_all();
++
+     switch (code)
+     {
+         case IOCTL_AFD_BIND:
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 0c68ca4..056a8f5 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -349,6 +349,7 @@ extern NTSTATUS serial_DeviceIoControl( HANDLE device, HANDLE event, PIO_APC_ROU
+ extern NTSTATUS serial_FlushBuffersFile( int fd );
+ extern NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user, IO_STATUS_BLOCK *io,
+                             UINT code, void *in_buffer, UINT in_size, void *out_buffer, UINT out_size );
++extern void sock_forget_handle( HANDLE handle );
+ extern NTSTATUS sock_read( HANDLE handle, int fd, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user,
+                            IO_STATUS_BLOCK *io, void *buffer, ULONG length );
+ extern NTSTATUS sock_write( HANDLE handle, int fd, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user,

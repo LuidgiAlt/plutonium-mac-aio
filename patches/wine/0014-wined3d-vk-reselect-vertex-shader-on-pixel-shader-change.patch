@@ -1,0 +1,164 @@
+Subject: wined3d: select the vertex shader again when the pixel shader changes
+Date: 2026-10-15
+Applies to: CrossOver 26.3.0 Wine sources, after 0013
+Files changed: dlls/wined3d/context_vk.c
+
+For shader model 1-3, the vertex shader is compiled with a varying map built
+from the pixel shader's inputs, which decides where each output is written.
+The Vulkan backend only selected the vertex shader variant again when the
+vertex shader or the vertex declaration changed, so after a pixel shader
+change it kept writing to the previous pixel shader's inputs. The pixel shader
+then read the wrong values, or inputs no vertex output wrote, which Metal
+rejects ("Fragment input(s) ... not written by vertex shader"); each rejected
+pipeline is a stall in BO1. A pixel shader change now selects the vertex
+shader variant again.
+
+Test: tests/src/d3d9-varying-test.c
+Review fixes (2026-10-24), also for 0009: the re-select condition now asks
+for another vertex shader variant only when (1) the vertex shader changed,
+(2) the integer vertex inputs changed (declaration or stream bindings; one
+helper, wined3d_context_vk_integer_inputs(), serves this and shader_spirv.c),
+or (3) a shader model 1-3 pixel shader changed (only those have a varying
+map). Before, every declaration and every pixel shader change re-selected
+the variant.
+License: LGPL-2.1-or-later, like the Wine files it modifies.
+---
+diff --git a/dlls/wined3d/context_vk.c b/dlls/wined3d/context_vk.c
+index aef1985..1345423 100644
+--- a/dlls/wined3d/context_vk.c
++++ b/dlls/wined3d/context_vk.c
+@@ -4036,6 +4036,40 @@ static void wined3d_context_vk_prepare_used_rtv(struct wined3d_context_vk *conte
+     }
+ }
+ 
++/* Which shader model 1-3 vertex shader inputs carry Direct3D 9 integer
++ * attributes (UBYTE4, SHORT2/4): bit n for input n. They reach the shader as
++ * floats; the shader declares them as integers and converts them. */
++void wined3d_context_vk_integer_inputs(const struct wined3d_context *context, const struct wined3d_state *state,
++        uint32_t *uint_inputs, uint32_t *sint_inputs)
++{
++    const struct wined3d_shader *vs = state->shader[WINED3D_SHADER_TYPE_VERTEX];
++    struct wined3d_stream_info stream_info;
++    unsigned int i;
++
++    *uint_inputs = *sint_inputs = 0;
++    if (!vs || vs->reg_maps.shader_version.major >= 4 || !state->vertex_declaration)
++        return;
++    wined3d_stream_info_from_declaration(&stream_info, state, context->d3d_info);
++    for (i = 0; i < ARRAY_SIZE(stream_info.elements); ++i)
++    {
++        if (!(stream_info.use_map & (1u << i)))
++            continue;
++        switch (stream_info.elements[i].format->id)
++        {
++            case WINED3DFMT_R8G8B8A8_UINT:
++            case WINED3DFMT_R10G10B10X2_UINT:
++                *uint_inputs |= 1u << i;
++                break;
++            case WINED3DFMT_R16G16_SINT:
++            case WINED3DFMT_R16G16B16A16_SINT:
++                *sint_inputs |= 1u << i;
++                break;
++            default:
++                break;
++        }
++    }
++}
++
+ VkCommandBuffer wined3d_context_vk_apply_draw_state(struct wined3d_context_vk *context_vk,
+         const struct wined3d_state *state, struct wined3d_buffer_vk *indirect_vk, bool indexed)
+ {
+@@ -4060,9 +4094,31 @@ VkCommandBuffer wined3d_context_vk_apply_draw_state(struct wined3d_context_vk *c
+         context_vk->c.shader_update_mask |= (1u << WINED3D_SHADER_TYPE_PIXEL);
+         context_vk->c.last_was_dual_source_blend = dual_source_blend;
+     }
+-    /* The vertex declaration selects which shader inputs are integers. */
+-    if (wined3d_context_is_graphics_state_dirty(&context_vk->c, STATE_SHADER(WINED3D_SHADER_TYPE_VERTEX))
+-            || wined3d_context_is_graphics_state_dirty(&context_vk->c, STATE_VDECL))
++    /* The vertex declaration selects which shader inputs are integers, and
++     * for shader model 1-3 the pixel shader's inputs select where the vertex
++     * shader writes its outputs (the varying map), so a new pixel shader needs
++     * the matching vertex shader variant. */
++    if (wined3d_context_is_graphics_state_dirty(&context_vk->c, STATE_VDECL)
++            || wined3d_context_is_graphics_state_dirty(&context_vk->c, STATE_STREAMSRC))
++    {
++        uint32_t uint_inputs, sint_inputs, integer_inputs;
++
++        /* Only a change of the integer inputs needs another variant; games
++         * switch declarations thousands of times per second. */
++        wined3d_context_vk_integer_inputs(&context_vk->c, state, &uint_inputs, &sint_inputs);
++        integer_inputs = uint_inputs | (sint_inputs << 16);
++        if (integer_inputs != context_vk->integer_inputs)
++        {
++            context_vk->integer_inputs = integer_inputs;
++            context_vk->c.shader_update_mask |= (1u << WINED3D_SHADER_TYPE_VERTEX);
++        }
++    }
++    if (wined3d_context_is_graphics_state_dirty(&context_vk->c, STATE_SHADER(WINED3D_SHADER_TYPE_VERTEX)))
++        context_vk->c.shader_update_mask |= (1u << WINED3D_SHADER_TYPE_VERTEX);
++    /* The varying map only exists for shader model 1-3 pixel shaders. */
++    if (wined3d_context_is_graphics_state_dirty(&context_vk->c, STATE_SHADER(WINED3D_SHADER_TYPE_PIXEL))
++            && (!state->shader[WINED3D_SHADER_TYPE_PIXEL]
++            || state->shader[WINED3D_SHADER_TYPE_PIXEL]->reg_maps.shader_version.major < 4))
+         context_vk->c.shader_update_mask |= (1u << WINED3D_SHADER_TYPE_VERTEX);
+     if (wined3d_context_is_graphics_state_dirty(&context_vk->c, STATE_SHADER(WINED3D_SHADER_TYPE_GEOMETRY)))
+         context_vk->c.shader_update_mask |= (1u << WINED3D_SHADER_TYPE_GEOMETRY);
+diff --git a/dlls/wined3d/shader_spirv.c b/dlls/wined3d/shader_spirv.c
+index eb72b0e..33cf5af 100644
+--- a/dlls/wined3d/shader_spirv.c
++++ b/dlls/wined3d/shader_spirv.c
+@@ -157,31 +157,7 @@ static void shader_spirv_compile_arguments_init(struct shader_spirv_compile_argu
+             /* Direct3D 9 integer vertex attributes reach the shader as
+              * floats; the shader has to declare them as integers and
+              * convert them itself. */
+-            if (shader->reg_maps.shader_version.major < 4 && state->vertex_declaration)
+-            {
+-                struct wined3d_stream_info stream_info;
+-                unsigned int i;
+-
+-                wined3d_stream_info_from_declaration(&stream_info, state, context->d3d_info);
+-                for (i = 0; i < ARRAY_SIZE(stream_info.elements); ++i)
+-                {
+-                    if (!(stream_info.use_map & (1u << i)))
+-                        continue;
+-                    switch (stream_info.elements[i].format->id)
+-                    {
+-                        case WINED3DFMT_R8G8B8A8_UINT:
+-                        case WINED3DFMT_R10G10B10X2_UINT:
+-                            args->u.vs.uint_inputs |= 1u << i;
+-                            break;
+-                        case WINED3DFMT_R16G16_SINT:
+-                        case WINED3DFMT_R16G16B16A16_SINT:
+-                            args->u.vs.sint_inputs |= 1u << i;
+-                            break;
+-                        default:
+-                            break;
+-                    }
+-                }
+-            }
++            wined3d_context_vk_integer_inputs(context, state, &args->u.vs.uint_inputs, &args->u.vs.sint_inputs);
+             break;
+         }
+ 
+diff --git a/dlls/wined3d/wined3d_vk.h b/dlls/wined3d/wined3d_vk.h
+index 65dab89..00b01fc 100644
+--- a/dlls/wined3d/wined3d_vk.h
++++ b/dlls/wined3d/wined3d_vk.h
+@@ -645,10 +645,17 @@ void wined3d_aux_command_pool_vk_retire_buffer(
+         struct wined3d_context_vk *context_vk, struct wined3d_aux_command_pool_vk *pool,
+         const struct wined3d_aux_command_buffer_vk *buffer, uint64_t command_buffer_id);
+ 
++void wined3d_context_vk_integer_inputs(const struct wined3d_context *context, const struct wined3d_state *state,
++        uint32_t *uint_inputs, uint32_t *sint_inputs);
++
+ struct wined3d_context_vk
+ {
+     struct wined3d_context c;
+ 
++    /* Integer vertex inputs the current vertex shader variant was chosen for
++     * (unsigned in the low 16 bits, signed in the high 16 bits). */
++    uint32_t integer_inputs;
++
+     const struct wined3d_vk_info *vk_info;
+ 
+     VkDynamicState dynamic_states[27];

@@ -1,0 +1,59 @@
+Subject: wined3d: report the fixed-function caps of the Vulkan fragment pipeline
+Date: 2026-10-13
+Applies to: CrossOver 26.3.0 Wine sources, after 0004
+Files changed: dlls/wined3d/shader_spirv.c
+
+With the Vulkan renderer, Direct3D 9 reported MaxSimultaneousTextures 0 and
+TextureOpCaps 0, although ffp_hlsl.c emulates all 8 texture stages and the same
+25 texture operations as the GLSL pipeline. Games that check these, like BO1,
+refuse to start ("not enough textures").
+
+Test: tests/src/d3d9-caps.c
+License: LGPL-2.1-or-later, like the Wine files it modifies.
+---
+diff --git a/dlls/wined3d/shader_spirv.c b/dlls/wined3d/shader_spirv.c
+index d5fa401..3a36724 100644
+--- a/dlls/wined3d/shader_spirv.c
++++ b/dlls/wined3d/shader_spirv.c
+@@ -1306,8 +1306,40 @@ static void spirv_fragment_pipe_vk_fp_disable(const struct wined3d_context *cont
+ 
+ static void spirv_fragment_pipe_vk_fp_get_caps(const struct wined3d_adapter *adapter, struct fragment_caps *caps)
+ {
++    /* The fixed-function pixel pipeline is emulated by the shaders from
++     * ffp_hlsl.c, which handle all texture stages and the same texture
++     * operations as the GLSL pipeline. Report them, so Direct3D 9 games that
++     * check MaxSimultaneousTextures or TextureOpCaps do not refuse to start. */
+     memset(caps, 0, sizeof(*caps));
++    caps->PrimitiveMiscCaps = WINED3DPMISCCAPS_TSSARGTEMP
++            | WINED3DPMISCCAPS_PERSTAGECONSTANT;
++    caps->TextureOpCaps = WINED3DTEXOPCAPS_DISABLE
++            | WINED3DTEXOPCAPS_SELECTARG1
++            | WINED3DTEXOPCAPS_SELECTARG2
++            | WINED3DTEXOPCAPS_MODULATE4X
++            | WINED3DTEXOPCAPS_MODULATE2X
++            | WINED3DTEXOPCAPS_MODULATE
++            | WINED3DTEXOPCAPS_ADDSIGNED2X
++            | WINED3DTEXOPCAPS_ADDSIGNED
++            | WINED3DTEXOPCAPS_ADD
++            | WINED3DTEXOPCAPS_SUBTRACT
++            | WINED3DTEXOPCAPS_ADDSMOOTH
++            | WINED3DTEXOPCAPS_BLENDCURRENTALPHA
++            | WINED3DTEXOPCAPS_BLENDFACTORALPHA
++            | WINED3DTEXOPCAPS_BLENDTEXTUREALPHA
++            | WINED3DTEXOPCAPS_BLENDDIFFUSEALPHA
++            | WINED3DTEXOPCAPS_BLENDTEXTUREALPHAPM
++            | WINED3DTEXOPCAPS_MODULATEALPHA_ADDCOLOR
++            | WINED3DTEXOPCAPS_MODULATECOLOR_ADDALPHA
++            | WINED3DTEXOPCAPS_MODULATEINVCOLOR_ADDALPHA
++            | WINED3DTEXOPCAPS_MODULATEINVALPHA_ADDCOLOR
++            | WINED3DTEXOPCAPS_DOTPRODUCT3
++            | WINED3DTEXOPCAPS_MULTIPLYADD
++            | WINED3DTEXOPCAPS_LERP
++            | WINED3DTEXOPCAPS_BUMPENVMAP
++            | WINED3DTEXOPCAPS_BUMPENVMAPLUMINANCE;
+     caps->max_blend_stages = WINED3D_MAX_FFP_TEXTURES;
++    caps->max_textures = WINED3D_MAX_FFP_TEXTURES;
+ }
+ 
+ static unsigned int spirv_fragment_pipe_vk_fp_get_emul_mask(const struct wined3d_adapter *adapter)
+

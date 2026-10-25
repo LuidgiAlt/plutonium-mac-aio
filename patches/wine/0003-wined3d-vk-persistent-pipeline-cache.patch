@@ -1,0 +1,324 @@
+Subject: wined3d: persist the Vulkan pipeline cache across runs
+Date: 2026-10-11, off switch 2026-10-13, background save 2026-10-18
+Applies to: CrossOver 26.3.0 Wine sources, after 0002
+Files changed: dlls/wined3d/adapter_vk.c, context_vk.c, shader_spirv.c, wined3d_vk.h
+
+MoltenVK turns every Vulkan pipeline into Metal source and compiles it, about
+160 ms each under Rosetta, and wined3d did that again on every run. The Vulkan
+backend now uses a VkPipelineCache saved to
+%LOCALAPPDATA%\wined3d-vk-cache\<exe>.pipelines. A background thread saves
+it once no new pipeline was created for 10 seconds, and the device saves it on
+exit. Saving on the render thread froze the game: MoltenVK took ~650 ms to
+write a 157 MB cache. MoltenVK compiles every pipeline of a loaded cache before
+the first frame, so a large cache makes startup slow;
+WINED3D_VK_PIPELINE_CACHE=0 runs without the file.
+
+Review fixes (2026-10-24):
+- The cache is saved only when its data changed since it was loaded or last
+  saved; every exit used to rewrite the whole file (157 MB for BO1).
+- vkGetPipelineCacheData must return VK_SUCCESS (VK_INCOMPLETE is retried
+  once with the new size); a file shorter than a cache header is never
+  written, and it is flushed before it replaces the old one.
+- A loaded file is used only if its header names this device (vendor,
+  device, pipeline cache UUID); files over 256 MB are neither loaded nor
+  saved; the cache is destroyed when device creation fails.
+Known: CrossOver's MoltenVK 1.2.10 writes the pipelines of a loaded cache
+again when the same pipelines are created, so the file grows on every run
+that draws (2655, 5274, 7893 bytes for one draw); the 256 MB limit bounds
+it. Delete %LOCALAPPDATA%\wined3d-vk-cache to start over.
+Test: tests/src/d3d9-pcache-test.c (unchanged, truncated, bad-uuid).
+License: LGPL-2.1-or-later, like the Wine files it modifies.
+---
+diff --git a/dlls/wined3d/adapter_vk.c b/dlls/wined3d/adapter_vk.c
+index 665f9a7..aac57b0 100644
+--- a/dlls/wined3d/adapter_vk.c
++++ b/dlls/wined3d/adapter_vk.c
+@@ -352,6 +352,200 @@ static void get_physical_device_info(const struct wined3d_adapter_vk *adapter_vk
+         VK_CALL(vkGetPhysicalDeviceFeatures(physical_device, &features2->features));
+ }
+ 
++/* MoltenVK turns every Vulkan pipeline into Metal source and compiles it,
++ * ~160 ms each under Rosetta. Without a cache that repeats for every pipeline
++ * on every run; keep the cache in a file in the user's local app data. */
++/* A Vulkan pipeline cache starts with this header (VkPipelineCacheHeaderVersionOne). */
++struct wined3d_vk_pipeline_cache_header
++{
++    uint32_t header_size, header_version, vendor_id, device_id;
++    uint8_t uuid[VK_UUID_SIZE];
++};
++
++#define WINED3D_VK_PIPELINE_CACHE_MAX (256u * 1024 * 1024)
++
++static void wined3d_device_vk_load_pipeline_cache(struct wined3d_device_vk *device_vk,
++        const struct wined3d_adapter_vk *adapter_vk)
++{
++    const struct wined3d_vk_info *vk_info = &device_vk->vk_info;
++    const struct wined3d_vk_pipeline_cache_header *header;
++    VkPhysicalDeviceProperties properties;
++    VkPipelineCacheCreateInfo info = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
++    WCHAR *path = device_vk->pipeline_cache_path, exe[MAX_PATH], *name;
++    void *data = NULL;
++    DWORD size = 0, done;
++    HANDLE file;
++    VkResult vr;
++
++    /* WINED3D_VK_PIPELINE_CACHE=0 turns the file off. */
++    if (GetEnvironmentVariableW(L"WINED3D_VK_PIPELINE_CACHE", exe, ARRAY_SIZE(exe)) && !wcscmp(exe, L"0"))
++        path[0] = 0;
++    else if (!GetEnvironmentVariableW(L"LOCALAPPDATA", path, MAX_PATH - 64) && !GetTempPathW(MAX_PATH - 64, path))
++        path[0] = 0;
++    if (path[0])
++    {
++        wcscat(path, L"\\wined3d-vk-cache");
++        CreateDirectoryW(path, NULL);
++        GetModuleFileNameW(NULL, exe, ARRAY_SIZE(exe));
++        name = wcsrchr(exe, '\\') ? wcsrchr(exe, '\\') + 1 : exe;
++        if (wcslen(path) + wcslen(name) + 12 < MAX_PATH)
++        {
++            wcscat(path, L"\\");
++            wcscat(path, name);
++            wcscat(path, L".pipelines");
++        }
++        else path[0] = 0;
++    }
++
++    if (path[0] && (file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
++            OPEN_EXISTING, 0, NULL)) != INVALID_HANDLE_VALUE)
++    {
++        size = GetFileSize(file, NULL);
++        if (size >= sizeof(*header) && size != INVALID_FILE_SIZE && size <= WINED3D_VK_PIPELINE_CACHE_MAX
++                && (data = malloc(size)) && ReadFile(file, data, size, &done, NULL) && done == size)
++        {
++            /* Only a cache this device made: another GPU or driver's data
++             * would be compiled for nothing, or rejected. */
++            header = data;
++            VK_CALL(vkGetPhysicalDeviceProperties(adapter_vk->physical_device, &properties));
++            if (header->header_size >= sizeof(*header) && header->header_version == VK_PIPELINE_CACHE_HEADER_VERSION_ONE
++                    && header->vendor_id == properties.vendorID && header->device_id == properties.deviceID
++                    && !memcmp(header->uuid, properties.pipelineCacheUUID, VK_UUID_SIZE))
++            {
++                info.initialDataSize = size;
++                info.pInitialData = data;
++            }
++            else
++            {
++                WARN("pipeline cache: %s was made by another device, ignored.\n", debugstr_w(path));
++            }
++        }
++        CloseHandle(file);
++    }
++
++    vr = VK_CALL(vkCreatePipelineCache(device_vk->vk_device, &info, NULL, &device_vk->vk_pipeline_cache));
++    if (vr < 0 && info.pInitialData)
++    {
++        info.initialDataSize = 0;
++        info.pInitialData = NULL;
++        vr = VK_CALL(vkCreatePipelineCache(device_vk->vk_device, &info, NULL, &device_vk->vk_pipeline_cache));
++    }
++    if (vr < 0)
++        device_vk->vk_pipeline_cache = VK_NULL_HANDLE;
++    device_vk->pipeline_cache_size = info.initialDataSize;
++    TRACE("pipeline cache: %s, loaded %lu bytes from %s\n", vr < 0 ? "unavailable" : "ready",
++            (unsigned long)info.initialDataSize, debugstr_w(path));
++    free(data);
++}
++
++static void wined3d_device_vk_save_pipeline_cache(struct wined3d_device_vk *device_vk)
++{
++    const struct wined3d_vk_info *vk_info = &device_vk->vk_info;
++    WCHAR tmp[MAX_PATH + 8];
++    size_t size = 0;
++    void *data = NULL;
++    DWORD done;
++    HANDLE file;
++    VkResult vr;
++    unsigned int i;
++
++    if (!device_vk->vk_pipeline_cache || !device_vk->pipeline_cache_path[0])
++        return;
++    /* The data may grow between the size query and the copy: retry once. */
++    for (i = 0; i < 2; ++i)
++    {
++        if (VK_CALL(vkGetPipelineCacheData(device_vk->vk_device, device_vk->vk_pipeline_cache, &size, NULL)) != VK_SUCCESS)
++            return;
++        /* Nothing new since the last load or save. */
++        if (size == device_vk->pipeline_cache_size)
++            return;
++        if (size < sizeof(struct wined3d_vk_pipeline_cache_header))
++            return;
++        if (size > WINED3D_VK_PIPELINE_CACHE_MAX)
++        {
++            WARN("pipeline cache: %lu bytes, more than the %u MB kept; not saved.\n",
++                    (unsigned long)size, WINED3D_VK_PIPELINE_CACHE_MAX >> 20);
++            return;
++        }
++        free(data);
++        if (!(data = malloc(size)))
++            return;
++        vr = VK_CALL(vkGetPipelineCacheData(device_vk->vk_device, device_vk->vk_pipeline_cache, &size, data));
++        if (vr == VK_SUCCESS)
++            break;
++        if (vr != VK_INCOMPLETE)
++        {
++            free(data);
++            return;
++        }
++    }
++    if (i == 2 || size < sizeof(struct wined3d_vk_pipeline_cache_header))
++    {
++        free(data);
++        return;
++    }
++
++    wcscpy(tmp, device_vk->pipeline_cache_path);
++    wcscat(tmp, L".tmp");
++    if ((file = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL)) != INVALID_HANDLE_VALUE)
++    {
++        BOOL ok = WriteFile(file, data, size, &done, NULL) && done == size && FlushFileBuffers(file);
++        CloseHandle(file);
++        if (ok && MoveFileExW(tmp, device_vk->pipeline_cache_path, MOVEFILE_REPLACE_EXISTING))
++        {
++            device_vk->pipeline_cache_size = size;
++            TRACE("pipeline cache: saved %lu bytes\n", (unsigned long)size);
++        }
++        else
++        {
++            DeleteFileW(tmp);
++        }
++    }
++    free(data);
++}
++
++/* Saving a large cache takes MoltenVK hundreds of milliseconds (~650 ms for
++ * 157 MB), and pipeline creation waits for it. Save on this thread instead of
++ * the render thread, and only after no new pipeline for 10 seconds. */
++static DWORD WINAPI wined3d_device_vk_pipeline_cache_thread(void *ctx)
++{
++    struct wined3d_device_vk *device_vk = ctx;
++
++    while (WaitForSingleObject(device_vk->pipeline_cache_stop, 2000) == WAIT_TIMEOUT)
++    {
++        if (device_vk->pipeline_cache_new && GetTickCount() - device_vk->pipeline_cache_last_new >= 10000)
++        {
++            InterlockedExchange(&device_vk->pipeline_cache_new, 0);
++            wined3d_device_vk_save_pipeline_cache(device_vk);
++        }
++    }
++    return 0;
++}
++
++static void wined3d_device_vk_start_pipeline_cache_thread(struct wined3d_device_vk *device_vk)
++{
++    if (!device_vk->vk_pipeline_cache || !device_vk->pipeline_cache_path[0])
++        return;
++    if (!(device_vk->pipeline_cache_stop = CreateEventW(NULL, TRUE, FALSE, NULL)))
++        return;
++    if (!(device_vk->pipeline_cache_thread = CreateThread(NULL, 0,
++            wined3d_device_vk_pipeline_cache_thread, device_vk, 0, NULL)))
++    {
++        CloseHandle(device_vk->pipeline_cache_stop);
++        device_vk->pipeline_cache_stop = NULL;
++    }
++}
++
++static void wined3d_device_vk_stop_pipeline_cache_thread(struct wined3d_device_vk *device_vk)
++{
++    if (!device_vk->pipeline_cache_thread)
++        return;
++    SetEvent(device_vk->pipeline_cache_stop);
++    WaitForSingleObject(device_vk->pipeline_cache_thread, INFINITE);
++    CloseHandle(device_vk->pipeline_cache_thread);
++    CloseHandle(device_vk->pipeline_cache_stop);
++}
++
+ static HRESULT adapter_vk_create_device(struct wined3d *wined3d, const struct wined3d_adapter *adapter,
+         enum wined3d_device_type device_type, HWND focus_window, unsigned int flags, BYTE surface_alignment,
+         const enum wined3d_feature_level *levels, unsigned int level_count,
+@@ -450,15 +644,20 @@ static HRESULT adapter_vk_create_device(struct wined3d *wined3d, const struct wi
+         goto fail;
+     }
+ 
++    wined3d_device_vk_load_pipeline_cache(device_vk, adapter_vk);
++
+     if (FAILED(hr = wined3d_device_init(&device_vk->d, wined3d, adapter->ordinal, device_type, focus_window,
+             flags, surface_alignment, levels, level_count, vk_info->supported, device_parent)))
+     {
+         WARN("Failed to initialize device, hr %#lx.\n", hr);
+         wined3d_allocator_cleanup(&device_vk->allocator);
++        if (device_vk->vk_pipeline_cache)
++            VK_CALL(vkDestroyPipelineCache(device_vk->vk_device, device_vk->vk_pipeline_cache, NULL));
+         goto fail;
+     }
+ 
+     wined3d_lock_init(&device_vk->allocator_cs, "wined3d_device_vk.allocator_cs");
++    wined3d_device_vk_start_pipeline_cache_thread(device_vk);
+ 
+     *device = &device_vk->d;
+ 
+@@ -480,6 +679,12 @@ static void adapter_vk_destroy_device(struct wined3d_device *device)
+ 
+     wined3d_lock_cleanup(&device_vk->allocator_cs);
+ 
++    wined3d_device_vk_stop_pipeline_cache_thread(device_vk);
++    if (device_vk->vk_pipeline_cache)
++    {
++        wined3d_device_vk_save_pipeline_cache(device_vk);
++        VK_CALL(vkDestroyPipelineCache(device_vk->vk_device, device_vk->vk_pipeline_cache, NULL));
++    }
+     VK_CALL(vkDestroyDevice(device_vk->vk_device, NULL));
+     free(device_vk);
+ }
+diff --git a/dlls/wined3d/context_vk.c b/dlls/wined3d/context_vk.c
+index 540a88a..94cca0b 100644
+--- a/dlls/wined3d/context_vk.c
++++ b/dlls/wined3d/context_vk.c
+@@ -3752,8 +3752,15 @@ static VkPipeline wined3d_context_vk_get_graphics_pipeline(struct wined3d_contex
+         return VK_NULL_HANDLE;
+     pipeline_vk->key = *key;
+ 
+-    if ((vr = VK_CALL(vkCreateGraphicsPipelines(device_vk->vk_device,
+-            VK_NULL_HANDLE, 1, &key->pipeline_desc, NULL, &pipeline_vk->vk_pipeline))) < 0)
++    vr = VK_CALL(vkCreateGraphicsPipelines(device_vk->vk_device,
++            device_vk->vk_pipeline_cache, 1, &key->pipeline_desc, NULL, &pipeline_vk->vk_pipeline));
++    /* The pipeline cache thread saves the cache once new pipelines stop coming. */
++    if (vr >= 0)
++    {
++        device_vk->pipeline_cache_last_new = GetTickCount();
++        InterlockedIncrement(&device_vk->pipeline_cache_new);
++    }
++    if (vr < 0)
+     {
+         WARN("Failed to create graphics pipeline, vr %s.\n", wined3d_debug_vkresult(vr));
+         free(pipeline_vk);
+diff --git a/dlls/wined3d/shader_spirv.c b/dlls/wined3d/shader_spirv.c
+index d5fa401..ab19b29 100644
+--- a/dlls/wined3d/shader_spirv.c
++++ b/dlls/wined3d/shader_spirv.c
+@@ -504,7 +504,7 @@ static struct shader_spirv_compute_program_vk *shader_spirv_find_compute_program
+     pipeline_info.basePipelineHandle = VK_NULL_HANDLE;
+     pipeline_info.basePipelineIndex = -1;
+     if ((vr = VK_CALL(vkCreateComputePipelines(device_vk->vk_device,
+-            VK_NULL_HANDLE, 1, &pipeline_info, NULL, &program->vk_pipeline))) < 0)
++            device_vk->vk_pipeline_cache, 1, &pipeline_info, NULL, &program->vk_pipeline))) < 0)
+     {
+         ERR("Failed to create Vulkan compute pipeline, vr %s.\n", wined3d_debug_vkresult(vr));
+         VK_CALL(vkDestroyShaderModule(device_vk->vk_device, program->vk_module, NULL));
+diff --git a/dlls/wined3d/wined3d_vk.h b/dlls/wined3d/wined3d_vk.h
+index 7d7bff1..fa84a96 100644
+--- a/dlls/wined3d/wined3d_vk.h
++++ b/dlls/wined3d/wined3d_vk.h
+@@ -917,6 +917,14 @@ struct wined3d_device_vk
+     struct wined3d_allocator allocator;
+ 
+     struct wined3d_uav_clear_state_vk uav_clear_state;
++
++    /* Persistent pipeline cache, so pipelines compiled in earlier runs are reused. */
++    VkPipelineCache vk_pipeline_cache;
++    LONG pipeline_cache_new;
++    DWORD pipeline_cache_last_new;
++    HANDLE pipeline_cache_thread, pipeline_cache_stop;
++    WCHAR pipeline_cache_path[MAX_PATH];
++    size_t pipeline_cache_size; /* bytes last loaded or saved: unchanged data is not saved again */
+ };
+ 
+ static inline struct wined3d_device_vk *wined3d_device_vk(struct wined3d_device *device)

@@ -1,0 +1,92 @@
+Subject: DXVK d3d9: request geometry shaders and cull distance only if offered
+Date: 2026-10-24
+Applies to: sources/dxvk (DXVK 1.10.3 cxaddon) from crossover-sources-26.3.0.tar.gz
+Files changed: src/d3d9/d3d9_device.cpp, src/d3d9/d3d9_include.h
+
+CrossOver's DXVK requires geometryShader and shaderCullDistance for Direct3D
+9. CodeWeavers' MoltenVK 1.2.10 has geometry shaders but no cull distance
+(the menu stayed black), Khronos' MoltenVK 1.4.2 has cull distance but no
+geometry shaders (vkCreateDevice fails with VK_ERROR_FEATURE_NOT_PRESENT for
+features 5 and 39). Direct3D 9 shaders only write clip distances, and
+geometry shaders serve some meta operations, so both are requested only when
+the device offers them.
+
+d3d9_include.h: current MinGW headers define D3DDEVINFO_RESOURCEMANAGER;
+DXVK's own definition is removed. Build with -Dcpp_args='-include cstdint'
+for GCC 16 (see build/build.sh).
+
+Test on MoltenVK 1.4.2 (tests/src/d3d9-*-test): device created;
+shader, format, VPOS and texture matrix tests correct; the clear test is
+wrong (draws after a clear inside a frame are missing).
+Review fixes (2026-10-24):
+- SupportsSWVP() also requires geometryShader: software vertex processing
+  (ProcessVertices) writes its output from a geometry shader. On MoltenVK
+  1.4.2 it used to run without one and write zeros; now it is refused, as on
+  devices without vertexPipelineStoresAndAtomics.
+Test: tests/src/d3d9-swvp-test.c.
+License: zlib, like the DXVK files it modifies.
+---
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 23b0a6f..2099a55 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -2613,7 +2613,7 @@ namespace dxvk {
+       static bool s_errorShown = false;
+ 
+       if (!std::exchange(s_errorShown, true))
+-        Logger::err("D3D9DeviceEx::ProcessVertices: SWVP emu unsupported (vertexPipelineStoresAndAtomics)");
++        Logger::err("D3D9DeviceEx::ProcessVertices: SWVP emu unsupported (vertexPipelineStoresAndAtomics, geometryShader)");
+ 
+       return D3D_OK;
+     }
+@@ -3901,7 +3901,10 @@ namespace dxvk {
+ 
+ 
+   bool D3D9DeviceEx::SupportsSWVP() {
+-    return m_dxvkDevice->features().core.features.vertexPipelineStoresAndAtomics;
++    // The emulation writes vertices from a geometry shader, which some
++    // devices lack (MoltenVK 1.4.2): refuse there instead of writing garbage.
++    const auto& features = m_dxvkDevice->features().core.features;
++    return features.vertexPipelineStoresAndAtomics && features.geometryShader;
+   }
+ 
+ 
+@@ -3914,8 +3917,9 @@ namespace dxvk {
+     DxvkDeviceFeatures supported = adapter->features();
+     DxvkDeviceFeatures enabled = {};
+ 
+-    // Geometry shaders are used for some meta ops
+-    enabled.core.features.geometryShader = VK_TRUE;
++    // Geometry shaders are used for some meta ops. MoltenVK 1.4.2 has none;
++    // request them only when the device offers them.
++    enabled.core.features.geometryShader = supported.core.features.geometryShader;
+     enabled.core.features.robustBufferAccess = VK_TRUE;
+     enabled.extRobustness2.robustBufferAccess2 = supported.extRobustness2.robustBufferAccess2;
+ 
+@@ -3944,7 +3948,9 @@ namespace dxvk {
+     enabled.core.features.sampleRateShading = VK_TRUE;
+     enabled.core.features.samplerAnisotropy = supported.core.features.samplerAnisotropy;
+     enabled.core.features.shaderClipDistance = VK_TRUE;
+-    enabled.core.features.shaderCullDistance = VK_TRUE;
++    // D3D9 shaders only write clip distances; CodeWeavers' MoltenVK 1.2.10
++    // has no cull distance support.
++    enabled.core.features.shaderCullDistance = supported.core.features.shaderCullDistance;
+ 
+     // Ensure we support real BC formats and unofficial vendor ones.
+     enabled.core.features.textureCompressionBC = VK_TRUE;
+diff --git a/src/d3d9/d3d9_include.h b/src/d3d9/d3d9_include.h
+index 8762265..adb1ad3 100644
+--- a/src/d3d9/d3d9_include.h
++++ b/src/d3d9/d3d9_include.h
+@@ -79,10 +79,7 @@
+ 
+ // MinGW headers are broken. Who'dve guessed?
+ #ifndef _MSC_VER
+-typedef struct _D3DDEVINFO_RESOURCEMANAGER
+-{
+-  char dummy;
+-} D3DDEVINFO_RESOURCEMANAGER, * LPD3DDEVINFO_RESOURCEMANAGER;
++/* D3DDEVINFO_RESOURCEMANAGER: defined by current MinGW headers. */
+ 
+ #ifndef __WINE__
+ extern "C" WINUSERAPI WINBOOL WINAPI SetProcessDPIAware(VOID);

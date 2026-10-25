@@ -1,0 +1,129 @@
+Subject: wined3d: reuse each sampler slot's last sampler when nothing changed
+Date: 2026-10-18
+Applies to: CrossOver 26.3.0 Wine sources, after 0016
+Files changed: dlls/wined3d/stateblock.c, device.c, wined3d_private.h
+
+For every texture a d3d9 game binds, wined3d_device_apply_stateblock() built a
+sampler description from the sampler states and the texture, and looked it up
+in the device's sampler tree. BO1 binds about three textures per draw at
+about 170,000 draws per second, nearly always with the same sampler states;
+this part took about 56 ms per second of the game's thread. Each sampler slot
+now remembers what its last sampler was made from (the texture and the
+texture properties the description reads, and the slot's sampler states) and
+reuses it when they match. The cache is cleared with the sampler tree.
+
+Test: all tests/src/d3d9-*-test.c
+License: LGPL-2.1-or-later, like the Wine files it modifies.
+---
+diff --git a/dlls/wined3d/device.c b/dlls/wined3d/device.c
+index a096909..f9f75a6 100644
+--- a/dlls/wined3d/device.c
++++ b/dlls/wined3d/device.c
+@@ -1722,6 +1722,7 @@ void wined3d_device_uninit_3d(struct wined3d_device *device)
+     state_cleanup(state);
+ 
+     wine_rb_destroy(&device->samplers, device_free_sampler, NULL);
++    memset(device->sampler_cache, 0, sizeof(device->sampler_cache));
+     wine_rb_destroy(&device->rasterizer_states, device_free_rasterizer_state, NULL);
+     wine_rb_destroy(&device->blend_states, device_free_blend_state, NULL);
+     wine_rb_destroy(&device->depth_stencil_states, device_free_depth_stencil_state, NULL);
+@@ -5299,6 +5300,7 @@ HRESULT CDECL wined3d_device_reset(struct wined3d_device *device,
+     }
+ 
+     wine_rb_destroy(&device->samplers, device_free_sampler, NULL);
++    memset(device->sampler_cache, 0, sizeof(device->sampler_cache));
+     wine_rb_destroy(&device->rasterizer_states, device_free_rasterizer_state, NULL);
+     wine_rb_destroy(&device->blend_states, device_free_blend_state, NULL);
+     wine_rb_destroy(&device->depth_stencil_states, device_free_depth_stencil_state, NULL);
+diff --git a/dlls/wined3d/stateblock.c b/dlls/wined3d/stateblock.c
+index def9182..88bb367 100644
+--- a/dlls/wined3d/stateblock.c
++++ b/dlls/wined3d/stateblock.c
+@@ -3650,6 +3650,7 @@ void CDECL wined3d_device_apply_stateblock(struct wined3d_device *device,
+     for (i = 0; i < ARRAY_SIZE(changed->samplerState); ++i)
+     {
+         enum wined3d_shader_type shader_type = WINED3D_SHADER_TYPE_PIXEL;
++        struct wined3d_sampler_cache_entry *cache;
+         struct wined3d_sampler_desc desc;
+         struct wined3d_texture *texture;
+         struct wined3d_sampler *sampler;
+@@ -3662,15 +3663,31 @@ void CDECL wined3d_device_apply_stateblock(struct wined3d_device *device,
+         if (!(texture = state->textures[i]))
+             continue;
+ 
+-        memset(&desc, 0, sizeof(desc));
+-        sampler_desc_from_sampler_states(&desc, state->sampler_states[i], texture);
+-
+         if (i >= WINED3D_VERTEX_SAMPLER_OFFSET)
+         {
+             shader_type = WINED3D_SHADER_TYPE_VERTEX;
+             bind_index -= WINED3D_VERTEX_SAMPLER_OFFSET;
+         }
+ 
++        /* Games rebind textures before nearly every draw (BO1: about three
++         * per draw), mostly with the same sampler states. Reuse the slot's
++         * last sampler when everything the description depends on is the
++         * same, instead of building the description and searching the tree. */
++        cache = &device->sampler_cache[i];
++        if (cache->sampler && cache->texture == texture && cache->lod == texture->lod
++                && cache->level_count == texture->level_count && cache->flags == texture->flags
++                && cache->usage == texture->resource.usage
++                && cache->format_attrs == texture->resource.format_attrs
++                && cache->format_caps == texture->resource.format_caps
++                && !memcmp(cache->states, state->sampler_states[i], sizeof(cache->states)))
++        {
++            wined3d_device_context_set_samplers(context, shader_type, bind_index, 1, &cache->sampler);
++            continue;
++        }
++
++        memset(&desc, 0, sizeof(desc));
++        sampler_desc_from_sampler_states(&desc, state->sampler_states[i], texture);
++
+         if ((entry = wine_rb_get(&device->samplers, &desc)))
+         {
+             sampler = WINE_RB_ENTRY_VALUE(entry, struct wined3d_sampler, entry);
+@@ -3685,8 +3702,23 @@ void CDECL wined3d_device_apply_stateblock(struct wined3d_device *device,
+             {
+                 ERR("Failed to insert sampler.\n");
+                 wined3d_sampler_decref(sampler);
++                continue;
+             }
+         }
++        else
++        {
++            continue;
++        }
++
++        cache->texture = texture;
++        cache->lod = texture->lod;
++        cache->level_count = texture->level_count;
++        cache->flags = texture->flags;
++        cache->usage = texture->resource.usage;
++        cache->format_attrs = texture->resource.format_attrs;
++        cache->format_caps = texture->resource.format_caps;
++        memcpy(cache->states, state->sampler_states[i], sizeof(cache->states));
++        cache->sampler = sampler;
+     }
+ 
+     if (state->vertex_declaration && state->vertex_declaration->position_transformed)
+diff --git a/dlls/wined3d/wined3d_private.h b/dlls/wined3d/wined3d_private.h
+index 6159b4a..79fb1e9 100644
+--- a/dlls/wined3d/wined3d_private.h
++++ b/dlls/wined3d/wined3d_private.h
+@@ -3082,6 +3082,16 @@ struct wined3d_device
+     struct list             shaders;   /* a linked list to track shaders (pixel and vertex)      */
+     struct wine_rb_tree so_descs;
+     struct wine_rb_tree samplers, rasterizer_states, blend_states, depth_stencil_states;
++    /* The last sampler made for each d3d9 sampler slot, and what it was made
++     * from (wined3d_device_apply_stateblock()). Cleared with "samplers". */
++    struct wined3d_sampler_cache_entry
++    {
++        const struct wined3d_texture *texture;
++        uint32_t usage, flags, format_attrs, format_caps;
++        unsigned int lod, level_count;
++        uint32_t states[WINED3D_HIGHEST_SAMPLER_STATE + 1];
++        struct wined3d_sampler *sampler;
++    } sampler_cache[WINED3D_MAX_COMBINED_SAMPLERS];
+     struct wine_rb_tree ffp_vertex_shaders, ffp_pixel_shaders;
+ 
+     /* Render Target Support */

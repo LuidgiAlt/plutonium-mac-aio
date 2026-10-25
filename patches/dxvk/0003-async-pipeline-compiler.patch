@@ -1,0 +1,536 @@
+Subject: DXVK: compile new graphics pipelines in the background (DXVK_ASYNC=1)
+Date: 2026-10-24
+Applies to: sources/dxvk (DXVK 1.10.3 cxaddon), after 0002
+Files changed: src/dxvk/dxvk_pipemanager.h, src/dxvk/dxvk_pipemanager.cpp,
+  src/dxvk/dxvk_graphics.h, src/dxvk/dxvk_graphics.cpp, src/dxvk/dxvk_context.cpp,
+  src/dxvk/dxvk_memory.cpp, src/d3d9/d3d9_device.cpp, src/util/util_stall.h (new)
+
+DXVK 1.10 compiles a graphics pipeline on the rendering thread the first
+time a draw needs it. On MoltenVK each one is a SPIR-V to Metal conversion
+plus a Metal compile, and Black Ops froze for a moment on every new effect.
+
+With DXVK_ASYNC=1, a pipeline that does not exist yet is queued to two
+low-priority threads in the pipeline manager, and getPipelineHandle()
+returns VK_NULL_HANDLE, which makes the context skip that draw; the next
+draw with the same state finds the pipeline once it is built. Each queued
+state is recorded so it is only queued once. Built pipelines go to the state
+cache as before, so later runs precompile them while loading. The compiler
+threads are stopped with the state cache workers and before the pipelines
+are destroyed.
+
+The rendering thread only takes a separate lock for the list of queued
+pipelines: the pipeline lock can be held for a whole compile by a state
+cache worker, and a first version that took it still froze the game. The
+background compile runs without that lock and publishes its result under
+it.
+
+Diagnostic, off unless DXVK_STALL_LOG=1: StallTimer (util_stall.h) logs
+every call over 5 ms that can block a frame: pipeline lookup, graphics
+state commit, shader creation, memory allocation, resource waits, CS thread
+synchronisation and Present.
+
+Cost: an object can be missing for the frames its pipeline takes to build.
+Same idea as the dxvk-async patch for DXVK 1.x, written for this tree.
+Review fixes (2026-10-24):
+- A failed background compile is stored like a built pipeline (null handle),
+  as the synchronous path does. Before, the state left the queue without an
+  instance and was queued again on the next draw: a pipeline MoltenVK
+  rejects was recompiled, and logged, every frame.
+- The first draw that queues a state waits up to 3 ms for it, so a quick
+  compile serves that draw instead of skipping it. Later draws with a state
+  still compiling skip without waiting. The waits share a budget of 3 ms in
+  any 16 ms (about a frame): a burst of 40 new states made one frame take
+  125-156 ms with a 3 ms wait each, 18 ms with the budget.
+- The queue already kept one state from being compiled by both threads at
+  once (a state stays queued until its result is published); now said in
+  the code.
+DXVK_ASYNC_FAIL_TEST=1 (tests only) makes every background compile fail.
+Test: tests/src/d3d9-async-fail-test.c (each failed state logged once),
+tests/src/d3d9-async-burst-test.c (frame with 40 new pipelines).
+License: zlib, like the DXVK files it modifies.
+---
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 7c1b0fd..4fe9366 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -1,3 +1,4 @@
++#include "../util/util_stall.h"
+ #include "d3d9_device.h"
+ 
+ #include "d3d9_annotation.h"
+@@ -3469,6 +3470,7 @@ namespace dxvk {
+           HWND hDestWindowOverride,
+     const RGNDATA* pDirtyRegion,
+           DWORD dwFlags) {
++    StallTimer stallTimer("Present");
+     return m_implicitSwapchain->Present(
+       pSourceRect,
+       pDestRect,
+@@ -4090,6 +4092,7 @@ namespace dxvk {
+   const Rc<DxvkResource>&                 Resource,
+         uint64_t                          SequenceNumber,
+         DWORD                             MapFlags) {
++    StallTimer stallTimer("WaitForResource");
+     // Wait for the any pending D3D9 command to be executed
+     // on the CS thread so that we can determine whether the
+     // resource is currently in use or not.
+@@ -4836,6 +4839,7 @@ namespace dxvk {
+ 
+ 
+   void D3D9DeviceEx::SynchronizeCsThread(uint64_t SequenceNumber) {
++    StallTimer stallTimer("SynchronizeCsThread");
+     D3D9DeviceLock lock = LockDevice();
+ 
+     // Dispatch current chunk so that all commands
+@@ -6513,6 +6517,7 @@ namespace dxvk {
+         VkShaderStageFlagBits ShaderStage,
+   const DWORD*                pShaderBytecode,
+   const DxsoModuleInfo*       pModuleInfo) {
++    StallTimer stallTimer("CreateShader");
+     try {
+       m_shaderModules->GetShaderModule(this, pShaderModule,
+         ShaderStage, pModuleInfo, pShaderBytecode);
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index fd63f9a..72aa7f4 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -1,3 +1,4 @@
++#include "../util/util_stall.h"
+ #include <cstring>
+ #include <vector>
+ #include <utility>
+@@ -4808,6 +4809,7 @@ namespace dxvk {
+   
+   template<bool Indexed, bool Indirect>
+   bool DxvkContext::commitGraphicsState() {
++    StallTimer stallTimer("commitGraphicsState");
+     if (m_flags.test(DxvkContextFlag::GpDirtyPipeline)) {
+       if (unlikely(!this->updateGraphicsPipeline()))
+         return false;
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+index 66c4131..cfa40a4 100644
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -1,3 +1,4 @@
++#include "../util/util_stall.h"
+ #include "../util/util_time.h"
+ 
+ #include "dxvk_device.h"
+@@ -63,6 +64,7 @@ namespace dxvk {
+   VkPipeline DxvkGraphicsPipeline::getPipelineHandle(
+     const DxvkGraphicsPipelineStateInfo& state,
+     const DxvkRenderPass*                renderPass) {
++    StallTimer stallTimer("getPipelineHandle");
+     DxvkGraphicsPipelineInstance* instance = this->findInstance(state, renderPass);
+ 
+     if (unlikely(!instance)) {
+@@ -70,6 +72,36 @@ namespace dxvk {
+       if (!this->validatePipelineState(state, true))
+         return VK_NULL_HANDLE;
+ 
++      if (m_pipeMgr->m_async) {
++        // Compile in the background and skip draws until it is ready.
++        // Only m_queueMutex is taken here: m_mutex can be held for the
++        // whole compile by a state cache worker.
++        std::unique_lock<dxvk::mutex> lock(m_queueMutex);
++
++        if ((instance = this->findInstance(state, renderPass)))
++          return instance->pipeline();
++
++        // Queued already: one of the compiler threads owns it until its
++        // result is published, so a state is never compiled twice at once.
++        for (auto& q : m_queued) {
++          if (q.isCompatible(state, renderPass))
++            return VK_NULL_HANDLE;
++        }
++
++        m_queued.emplace_back(state, renderPass, VK_NULL_HANDLE);
++        m_pipeMgr->m_asyncCompiler->queue(this, state, renderPass);
++
++        // Wait a little once, so that a quick compile still serves this
++        // draw; a longer one skips it as before. The waits share a budget
++        // (3 ms in any 16 ms), so a burst of new states cannot stall a frame.
++        uint32_t waitMs = m_pipeMgr->takeAsyncWaitBudget(3);
++
++        if (waitMs)
++          m_queueCond.wait_for(lock, std::chrono::milliseconds(waitMs));
++        instance = this->findInstance(state, renderPass);
++        return instance ? instance->pipeline() : VK_NULL_HANDLE;
++      }
++
+       // Prevent other threads from adding new instances and check again
+       std::lock_guard<dxvk::mutex> lock(m_mutex);
+       instance = this->findInstance(state, renderPass);
+@@ -86,6 +118,60 @@ namespace dxvk {
+   }
+ 
+ 
++  void DxvkGraphicsPipeline::compileQueued(
++    const DxvkGraphicsPipelineStateInfo& state,
++    const DxvkRenderPass*                renderPass) {
++    // Compile without holding m_mutex, then publish the result.
++    VkPipeline pipeline = VK_NULL_HANDLE;
++
++    if (!this->findInstance(state, renderPass)) {
++      pipeline = this->createPipeline(state, renderPass);
++
++      // DXVK_ASYNC_FAIL_TEST=1 (tests only): every background compile fails.
++      static const bool failTest = env::getEnvVar("DXVK_ASYNC_FAIL_TEST") == "1";
++
++      if (failTest && pipeline) {
++        this->destroyPipeline(pipeline);
++        pipeline = VK_NULL_HANDLE;
++      }
++
++      if (!pipeline)
++        Logger::err("DxvkGraphicsPipeline: async compile failed");
++    }
++
++    { std::lock_guard<dxvk::mutex> lock(m_mutex);
++
++      if (!this->findInstance(state, renderPass)) {
++        // A failed compile is stored as well (null handle), as the
++        // synchronous path does, so that draws with this state are skipped
++        // instead of queueing the same compile again every frame.
++        m_pipelines.emplace(state, renderPass, pipeline);
++
++        if (pipeline) {
++          m_pipeMgr->m_numGraphicsPipelines += 1;
++          this->writePipelineStateToCache(state, renderPass->format());
++        }
++
++        pipeline = VK_NULL_HANDLE;
++      }
++    }
++
++    if (pipeline)
++      this->destroyPipeline(pipeline);
++
++    std::lock_guard<dxvk::mutex> lock(m_queueMutex);
++
++    for (auto q = m_queued.begin(); q != m_queued.end(); q++) {
++      if (q->isCompatible(state, renderPass)) {
++        m_queued.erase(q);
++        break;
++      }
++    }
++
++    m_queueCond.notify_all();
++  }
++
++
+   void DxvkGraphicsPipeline::compilePipeline(
+     const DxvkGraphicsPipelineStateInfo& state,
+     const DxvkRenderPass*                renderPass) {
+diff --git a/src/dxvk/dxvk_graphics.h b/src/dxvk/dxvk_graphics.h
+index 50d16b1..e43f47b 100644
+--- a/src/dxvk/dxvk_graphics.h
++++ b/src/dxvk/dxvk_graphics.h
+@@ -216,6 +216,16 @@ namespace dxvk {
+     void compilePipeline(
+       const DxvkGraphicsPipelineStateInfo&    state,
+       const DxvkRenderPass*                   renderPass);
++
++    /**
++     * \brief Compiles a pipeline queued by the async compiler
++     *
++     * Creates the instance and writes it to the state cache,
++     * then removes it from the list of queued pipelines.
++     */
++    void compileQueued(
++      const DxvkGraphicsPipelineStateInfo&    state,
++      const DxvkRenderPass*                   renderPass);
+     
+   private:
+     
+@@ -237,6 +247,12 @@ namespace dxvk {
+     alignas(CACHE_LINE_SIZE)
+     dxvk::mutex                               m_mutex;
+     sync::List<DxvkGraphicsPipelineInstance>  m_pipelines;
++
++    // Pipelines queued for the async compiler. Own lock, so that the
++    // rendering thread never waits for m_mutex, which compilers hold.
++    dxvk::mutex                               m_queueMutex;
++    dxvk::condition_variable                  m_queueCond;
++    std::vector<DxvkGraphicsPipelineInstance> m_queued;
+     
+     DxvkGraphicsPipelineInstance* createInstance(
+       const DxvkGraphicsPipelineStateInfo& state,
+diff --git a/src/dxvk/dxvk_memory.cpp b/src/dxvk/dxvk_memory.cpp
+index a33772c..2f8487e 100644
+--- a/src/dxvk/dxvk_memory.cpp
++++ b/src/dxvk/dxvk_memory.cpp
+@@ -1,3 +1,4 @@
++#include "../util/util_stall.h"
+ #include <algorithm>
+ 
+ #include "dxvk_device.h"
+@@ -395,6 +396,7 @@ namespace dxvk {
+           VkDeviceSize                      size,
+           DxvkMemoryFlags                   hints,
+     const VkMemoryDedicatedAllocateInfo*    dedAllocInfo) {
++    StallTimer stallTimer("vkAllocateMemory");
+     bool useMemoryPriority = (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+                           && (m_device->features().extMemoryPriority.memoryPriority);
+     
+diff --git a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
+index 4c5ea32..5c82101 100644
+--- a/src/dxvk/dxvk_pipemanager.cpp
++++ b/src/dxvk/dxvk_pipemanager.cpp
+@@ -13,6 +13,70 @@ namespace dxvk {
+     
+     if (useStateCache != "0" && device->config().enableStateCache)
+       m_stateCache = new DxvkStateCache(device, this, passManager);
++
++    if (env::getEnvVar("DXVK_ASYNC") == "1") {
++      m_async = true;
++      m_asyncCompiler = std::make_unique<DxvkAsyncCompiler>(2);
++      Logger::info("DXVK: Async pipeline compiler enabled");
++    }
++  }
++
++
++  DxvkAsyncCompiler::DxvkAsyncCompiler(uint32_t numThreads) {
++    for (uint32_t i = 0; i < numThreads; i++) {
++      m_threads.emplace_back([this] () { run(); });
++      m_threads.back().set_priority(ThreadPriority::Lowest);
++    }
++  }
++
++
++  DxvkAsyncCompiler::~DxvkAsyncCompiler() {
++    this->stop();
++  }
++
++
++  void DxvkAsyncCompiler::stop() {
++    { std::lock_guard<dxvk::mutex> lock(m_mutex);
++      if (m_stop)
++        return;
++      m_stop = true;
++      m_cond.notify_all();
++    }
++
++    for (auto& t : m_threads)
++      t.join();
++    m_threads.clear();
++  }
++
++
++  void DxvkAsyncCompiler::queue(
++          DxvkGraphicsPipeline*         pipeline,
++    const DxvkGraphicsPipelineStateInfo& state,
++    const DxvkRenderPass*               renderPass) {
++    std::lock_guard<dxvk::mutex> lock(m_mutex);
++    m_queue.push({ pipeline, state, renderPass });
++    m_cond.notify_one();
++  }
++
++
++  void DxvkAsyncCompiler::run() {
++    env::setThreadName("dxvk-async");
++
++    while (true) {
++      Job job;
++
++      { std::unique_lock<dxvk::mutex> lock(m_mutex);
++        m_cond.wait(lock, [this] { return m_stop || !m_queue.empty(); });
++
++        if (m_stop)
++          return;
++
++        job = m_queue.front();
++        m_queue.pop();
++      }
++
++      job.pipeline->compileQueued(job.state, job.renderPass);
++    }
+   }
+   
+   
+@@ -80,7 +144,29 @@ namespace dxvk {
+   }
+ 
+ 
++  uint32_t DxvkPipelineManager::takeAsyncWaitBudget(uint32_t wantMs) {
++    constexpr uint32_t BudgetMs = 3;
++    constexpr uint64_t WindowMs = 16;
++    uint64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
++      dxvk::high_resolution_clock::now().time_since_epoch()).count();
++
++    std::lock_guard<dxvk::mutex> lock(m_asyncWaitMutex);
++
++    if (nowMs - m_asyncWaitWindowMs >= WindowMs) {
++      m_asyncWaitWindowMs = nowMs;
++      m_asyncWaitSpentMs = 0;
++    }
++
++    uint32_t grant = std::min(wantMs, BudgetMs - std::min(m_asyncWaitSpentMs, BudgetMs));
++    m_asyncWaitSpentMs += grant;
++    return grant;
++  }
++
++
+   void DxvkPipelineManager::stopWorkerThreads() const {
++    if (m_asyncCompiler)
++      m_asyncCompiler->stop();
++
+     if (m_stateCache != nullptr)
+       m_stateCache->stopWorkerThreads();
+   }
+diff --git a/src/dxvk/dxvk_pipemanager.h b/src/dxvk/dxvk_pipemanager.h
+index 08c79e0..096d848 100644
+--- a/src/dxvk/dxvk_pipemanager.h
++++ b/src/dxvk/dxvk_pipemanager.h
+@@ -2,7 +2,9 @@
+ #pragma once
+ 
+ #include <mutex>
++#include <queue>
+ #include <unordered_map>
++#include <vector>
+ 
+ #include "dxvk_compute.h"
+ #include "dxvk_graphics.h"
+@@ -11,6 +13,45 @@ namespace dxvk {
+ 
+   class DxvkStateCache;
+ 
++  /**
++   * \brief Background compiler for graphics pipelines
++   *
++   * With DXVK_ASYNC=1, a pipeline that is not compiled yet is queued here
++   * instead of being compiled on the rendering thread; draws that need it
++   * are skipped until it is ready.
++   */
++  class DxvkAsyncCompiler {
++
++  public:
++
++    explicit DxvkAsyncCompiler(uint32_t numThreads);
++    ~DxvkAsyncCompiler();
++
++    void queue(
++            DxvkGraphicsPipeline*         pipeline,
++      const DxvkGraphicsPipelineStateInfo& state,
++      const DxvkRenderPass*               renderPass);
++
++    void stop();
++
++  private:
++
++    struct Job {
++      DxvkGraphicsPipeline*         pipeline;
++      DxvkGraphicsPipelineStateInfo state;
++      const DxvkRenderPass*         renderPass;
++    };
++
++    dxvk::mutex                m_mutex;
++    dxvk::condition_variable   m_cond;
++    std::queue<Job>            m_queue;
++    bool                       m_stop = false;
++    std::vector<dxvk::thread>  m_threads;
++
++    void run();
++
++  };
++
+   /**
+    * \brief Pipeline count
+    * 
+@@ -94,6 +135,16 @@ namespace dxvk {
+      * \brief Stops async compiler threads
+      */
+     void stopWorkerThreads() const;
++
++    /**
++     * \brief Milliseconds a draw may wait for a background compile
++     *
++     * Draws share a budget of 3 ms in every 16 ms (about a frame), so that
++     * a burst of new pipelines cannot add 3 ms each to one frame.
++     * \param [in] wantMs Wait the draw would like
++     * \returns Milliseconds granted (taken from the budget), maybe 0
++     */
++    uint32_t takeAsyncWaitBudget(uint32_t wantMs);
+     
+   private:
+     
+@@ -103,6 +154,12 @@ namespace dxvk {
+ 
+     std::atomic<uint32_t>     m_numComputePipelines  = { 0 };
+     std::atomic<uint32_t>     m_numGraphicsPipelines = { 0 };
++
++    bool                      m_async = false;
++
++    dxvk::mutex               m_asyncWaitMutex;
++    uint64_t                  m_asyncWaitWindowMs = 0;
++    uint32_t                  m_asyncWaitSpentMs = 0;
+     
+     dxvk::mutex m_mutex;
+     
+@@ -115,6 +172,9 @@ namespace dxvk {
+       DxvkGraphicsPipelineShaders,
+       DxvkGraphicsPipeline,
+       DxvkHash, DxvkEq> m_graphicsPipelines;
++
++    // Declared after the pipelines: destroyed (threads joined) first.
++    std::unique_ptr<DxvkAsyncCompiler> m_asyncCompiler;
+     
+   };
+   
+diff --git a/src/util/util_stall.h b/src/util/util_stall.h
+new file mode 100644
+index 0000000..7db53f9
+--- /dev/null
++++ b/src/util/util_stall.h
+@@ -0,0 +1,50 @@
++#pragma once
++
++#include <chrono>
++
++#include "log/log.h"
++#include "util_env.h"
++#include "util_string.h"
++
++namespace dxvk {
++
++  /**
++   * \brief Logs a scope that took longer than 5 ms
++   *
++   * Diagnostic, enabled with DXVK_STALL_LOG=1: one warning per slow call,
++   * with the thread name, to find what blocks a frame.
++   */
++  class StallTimer {
++
++  public:
++
++    explicit StallTimer(const char* what)
++    : m_what(what) {
++      if (enabled())
++        m_start = std::chrono::steady_clock::now();
++    }
++
++    ~StallTimer() {
++      if (!enabled())
++        return;
++
++      auto us = std::chrono::duration_cast<std::chrono::microseconds>(
++        std::chrono::steady_clock::now() - m_start).count();
++
++      if (us >= 5000)
++        Logger::warn(str::format("stall: ", m_what, " ", us / 1000, " ms"));
++    }
++
++    static bool enabled() {
++      static const bool on = env::getEnvVar("DXVK_STALL_LOG") == "1";
++      return on;
++    }
++
++  private:
++
++    const char* m_what;
++    std::chrono::steady_clock::time_point m_start;
++
++  };
++
++}

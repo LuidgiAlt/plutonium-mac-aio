@@ -1,0 +1,102 @@
+Subject: wined3d: Direct3D 9 shader constants on Vulkan without render pass breaks
+Date: 2026-10-13
+Applies to: CrossOver 26.3.0 Wine sources, after 0009
+Files changed: dlls/wined3d/cs.c, dlls/wined3d/device.c, dlls/wined3d/wined3d_private.h
+
+On Vulkan, wined3d keeps shader constants in GPU-only buffers, and each
+Set*ShaderConstant updated part of one. A partial update of a buffer the GPU
+may still read is done as a GPU copy, which ends the current render pass.
+Direct3D 9 games set constants before nearly every draw: BO1 ended about 2,500
+render passes per frame, and Apple's tile-based GPUs store and reload the
+render targets at every break (GPU 285 ms per frame).
+
+Each push constant buffer now has a client-side copy and is host-visible, and
+every change uploads the whole buffer, which renames it and is written by the
+CPU. Updates that do not change the values are skipped. Same scene afterwards:
+GPU 9.8 ms per frame.
+
+Test: tests/src/d3d9-constants-test.c
+License: LGPL-2.1-or-later, like the Wine files it modifies.
+---
+--- a/dlls/wined3d/wined3d_private.h
++++ b/dlls/wined3d/wined3d_private.h
+@@ -3107,6 +3107,9 @@
+     struct wined3d_cs *cs;
+ 
+     struct wined3d_buffer *push_constants[WINED3D_PUSH_CONSTANTS_COUNT];
++    /* Client-side copy of each push constant buffer, when the constants live
++     * in GPU buffers (gpu_push_constants). */
++    void *push_constant_data[WINED3D_PUSH_CONSTANTS_COUNT];
+ 
+     /* Context management */
+     struct wined3d_context **contexts;
+--- a/dlls/wined3d/device.c
++++ b/dlls/wined3d/device.c
+@@ -1713,8 +1713,10 @@
+     {
+         if ((buffer = device->push_constants[i]))
+             wined3d_buffer_decref(buffer);
++        free(device->push_constant_data[i]);
+     }
+     memset(device->push_constants, 0, sizeof(device->push_constants));
++    memset(device->push_constant_data, 0, sizeof(device->push_constant_data));
+ 
+     wined3d_device_context_emit_reset_state(&device->cs->c, true);
+     state_cleanup(state);
+@@ -5045,6 +5047,8 @@
+             if (device->push_constants[i])
+                 wined3d_buffer_decref(device->push_constants[i]);
+             device->push_constants[i] = NULL;
++            free(device->push_constant_data[i]);
++            device->push_constant_data[i] = NULL;
+         }
+         state_unbind_resources(state);
+     }
+--- a/dlls/wined3d/cs.c
++++ b/dlls/wined3d/cs.c
+@@ -2180,8 +2180,14 @@
+ 
+     if (gpu)
+     {
++        /* Host-visible, so that whole-buffer updates can rename the buffer
++         * and write it directly instead of copying on the GPU. */
+         desc.bind_flags = WINED3D_BIND_CONSTANT_BUFFER;
+-        desc.access = WINED3D_RESOURCE_ACCESS_GPU;
++        desc.access = WINED3D_RESOURCE_ACCESS_GPU | WINED3D_RESOURCE_ACCESS_MAP_W;
++        /* One extra byte: set once the buffer has been uploaded. */
++        if (!device->push_constant_data[type]
++                && !(device->push_constant_data[type] = calloc(1, desc.byte_width + 1)))
++            return false;
+     }
+ 
+     if (!device->push_constants[type] && FAILED(hr = wined3d_buffer_create(device,
+@@ -2248,6 +2254,29 @@
+     if (!prepare_push_constant_buffer(context, type))
+         return;
+ 
++    /* A partial update of a constant buffer the GPU may still be reading is
++     * done as a GPU copy, which on Vulkan ends the current render pass. That
++     * happened for nearly every draw in Direct3D 9 games and is very costly
++     * on tile-based GPUs. Update the client-side copy and upload all of it:
++     * a whole-buffer update renames the buffer and is written by the CPU. */
++    if (context->device->push_constant_data[type])
++    {
++        struct wined3d_resource *resource = &context->device->push_constants[type]->resource;
++        uint8_t *data = context->device->push_constant_data[type];
++
++        /* Games often set the same values again before each draw. */
++        if (data[resource->size] && !memcmp(data + byte_offset, constants, byte_size))
++            return;
++
++        memcpy(data + byte_offset, constants, byte_size);
++        data[resource->size] = 1;
++        wined3d_box_set(&box, 0, 0, resource->size, 1, 0, 1);
++        wined3d_device_context_emit_update_sub_resource(context, resource, 0, &box,
++                context->device->push_constant_data[type], resource->size, resource->size);
++        wined3d_device_context_emit_push_constants(context, type, update_mask, start_idx, count);
++        return;
++    }
++
+     wined3d_box_set(&box, byte_offset, 0, byte_offset + byte_size, 1, 0, 1);
+     wined3d_device_context_emit_update_sub_resource(context,
+             &context->device->push_constants[type]->resource, 0, &box, constants, byte_size, byte_size);

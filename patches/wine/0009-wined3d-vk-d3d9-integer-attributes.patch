@@ -1,0 +1,252 @@
+Subject: wined3d, vkd3d-shader: integer vertex attributes for Direct3D 9 on Vulkan
+Date: 2026-10-13
+Applies to: CrossOver 26.3.0 Wine sources, after 0008
+Files changed: dlls/wined3d/context_vk.c, dlls/wined3d/shader_spirv.c, libs/vkd3d/include/vkd3d_shader.h, libs/vkd3d/libs/vkd3d-shader/ir.c
+
+Direct3D 9 reads UBYTE4, SHORT2 and SHORT4 vertex data as floats holding the
+integer values. wined3d binds them as Vulkan integer formats while the shader
+declares float inputs, and MoltenVK rejects the pipeline. Metal has no scaled
+vertex formats. wined3d now passes masks of integer inputs (new shader
+parameters SM1_UINT_INPUT_MASK and SM1_SINT_INPUT_MASK) and selects the vertex
+shader again when the vertex declaration changes; vkd3d-shader declares those
+inputs as integers and converts them to float at the start of the shader.
+
+Test: tests/src/d3d9-ubyte4-test.c
+Review fixes (2026-10-24): the vertex shader variant is now re-selected only
+when the integer inputs change, not on every vertex declaration change
+(about 10,000 per second in BO1); that check lives in 0014, which owns the
+re-select condition. Test: tests/src/d3d9-short4-test.c,
+tests/src/d3d9-declswitch-test.c.
+License: LGPL-2.1-or-later, like the Wine files it modifies.
+---
+diff --git a/dlls/wined3d/context_vk.c b/dlls/wined3d/context_vk.c
+index 94cca0b..ac89b03 100644
+--- a/dlls/wined3d/context_vk.c
++++ b/dlls/wined3d/context_vk.c
+@@ -3981,7 +3981,9 @@ VkCommandBuffer wined3d_context_vk_apply_draw_state(struct wined3d_context_vk *c
+         context_vk->c.shader_update_mask |= (1u << WINED3D_SHADER_TYPE_PIXEL);
+         context_vk->c.last_was_dual_source_blend = dual_source_blend;
+     }
+-    if (wined3d_context_is_graphics_state_dirty(&context_vk->c, STATE_SHADER(WINED3D_SHADER_TYPE_VERTEX)))
++    /* The vertex declaration selects which shader inputs are integers. */
++    if (wined3d_context_is_graphics_state_dirty(&context_vk->c, STATE_SHADER(WINED3D_SHADER_TYPE_VERTEX))
++            || wined3d_context_is_graphics_state_dirty(&context_vk->c, STATE_VDECL))
+         context_vk->c.shader_update_mask |= (1u << WINED3D_SHADER_TYPE_VERTEX);
+     if (wined3d_context_is_graphics_state_dirty(&context_vk->c, STATE_SHADER(WINED3D_SHADER_TYPE_GEOMETRY)))
+         context_vk->c.shader_update_mask |= (1u << WINED3D_SHADER_TYPE_GEOMETRY);
+diff --git a/dlls/wined3d/shader_spirv.c b/dlls/wined3d/shader_spirv.c
+index 3a36724..e0cc830 100644
+--- a/dlls/wined3d/shader_spirv.c
++++ b/dlls/wined3d/shader_spirv.c
+@@ -62,6 +62,7 @@ struct shader_spirv_compile_arguments
+             struct vkd3d_shader_varying_map varying_map[MAX_SM1_INTER_STAGE_VARYINGS];
+             unsigned int varying_count;
+             uint8_t clip_planes;
++            uint32_t uint_inputs, sint_inputs;
+         } vs;
+         struct
+         {
+@@ -105,7 +106,7 @@ struct wined3d_shader_spirv_compile_args
+     struct vkd3d_shader_spirv_target_info spirv_target;
+     struct vkd3d_shader_parameter_info parameter_info;
+     enum vkd3d_shader_spirv_extension extensions[1];
+-    struct vkd3d_shader_parameter1 parameters[12];
++    struct vkd3d_shader_parameter1 parameters[14];
+     unsigned int ps_alpha_swizzle[WINED3D_MAX_RENDER_TARGETS];
+ };
+ 
+@@ -152,6 +153,35 @@ static void shader_spirv_compile_arguments_init(struct shader_spirv_compile_argu
+             }
+ 
+             args->u.vs.clip_planes = state->extra_vs_args.clip_planes;
++
++            /* Direct3D 9 integer vertex attributes reach the shader as
++             * floats; the shader has to declare them as integers and
++             * convert them itself. */
++            if (shader->reg_maps.shader_version.major < 4 && state->vertex_declaration)
++            {
++                struct wined3d_stream_info stream_info;
++                unsigned int i;
++
++                wined3d_stream_info_from_declaration(&stream_info, state, context->d3d_info);
++                for (i = 0; i < ARRAY_SIZE(stream_info.elements); ++i)
++                {
++                    if (!(stream_info.use_map & (1u << i)))
++                        continue;
++                    switch (stream_info.elements[i].format->id)
++                    {
++                        case WINED3DFMT_R8G8B8A8_UINT:
++                        case WINED3DFMT_R10G10B10X2_UINT:
++                            args->u.vs.uint_inputs |= 1u << i;
++                            break;
++                        case WINED3DFMT_R16G16_SINT:
++                        case WINED3DFMT_R16G16B16A16_SINT:
++                            args->u.vs.sint_inputs |= 1u << i;
++                            break;
++                        default:
++                            break;
++                    }
++                }
++            }
+             break;
+         }
+ 
+@@ -197,7 +227,16 @@ static void fill_vs_parameters(struct wined3d_shader_spirv_compile_args *vkd3d_a
+     fill_buffer_parameter(&parameters[11], ffp_extra_binding, VKD3D_SHADER_PARAMETER_NAME_POINT_SIZE_MAX,
+             VKD3D_SHADER_PARAMETER_DATA_TYPE_FLOAT32, offsetof(struct wined3d_ffp_vs_constants, point_clamp.max));
+ 
+-    vkd3d_args->parameter_info.parameter_count = 12;
++    parameters[12].name = VKD3D_SHADER_PARAMETER_NAME_SM1_UINT_INPUT_MASK;
++    parameters[12].type = VKD3D_SHADER_PARAMETER_TYPE_IMMEDIATE_CONSTANT;
++    parameters[12].data_type = VKD3D_SHADER_PARAMETER_DATA_TYPE_UINT32;
++    parameters[12].u.immediate_constant.u.u32 = compile_args->u.vs.uint_inputs;
++    parameters[13].name = VKD3D_SHADER_PARAMETER_NAME_SM1_SINT_INPUT_MASK;
++    parameters[13].type = VKD3D_SHADER_PARAMETER_TYPE_IMMEDIATE_CONSTANT;
++    parameters[13].data_type = VKD3D_SHADER_PARAMETER_DATA_TYPE_UINT32;
++    parameters[13].u.immediate_constant.u.u32 = compile_args->u.vs.sint_inputs;
++
++    vkd3d_args->parameter_info.parameter_count = 14;
+     vkd3d_args->parameter_info.parameters = vkd3d_args->parameters;
+ }
+ 
+diff --git a/libs/vkd3d/include/vkd3d_shader.h b/libs/vkd3d/include/vkd3d_shader.h
+index 352c222..93b05fa 100644
+--- a/libs/vkd3d/include/vkd3d_shader.h
++++ b/libs/vkd3d/include/vkd3d_shader.h
+@@ -1039,6 +1039,18 @@ enum vkd3d_shader_parameter_name
+     VKD3D_SHADER_PARAMETER_NAME_BUMP_LUMINANCE_OFFSET_3,
+     VKD3D_SHADER_PARAMETER_NAME_BUMP_LUMINANCE_OFFSET_4,
+     VKD3D_SHADER_PARAMETER_NAME_BUMP_LUMINANCE_OFFSET_5,
++    /**
++     * Bit mask of shader model 1-3 vertex shader input registers that are
++     * fed from unsigned (respectively signed) integer vertex attributes,
++     * such as Direct3D 9's D3DDECLTYPE_UBYTE4 and D3DDECLTYPE_SHORT2. Such
++     * inputs are declared with an integer type and converted to float when
++     * the shader starts, as Direct3D 9 defines.
++     *
++     * The data type must be VKD3D_SHADER_PARAMETER_DATA_TYPE_UINT32 and the
++     * type VKD3D_SHADER_PARAMETER_TYPE_IMMEDIATE_CONSTANT. The default is 0.
++     */
++    VKD3D_SHADER_PARAMETER_NAME_SM1_UINT_INPUT_MASK,
++    VKD3D_SHADER_PARAMETER_NAME_SM1_SINT_INPUT_MASK,
+ 
+     VKD3D_FORCE_32_BIT_ENUM(VKD3D_SHADER_PARAMETER_NAME),
+ };
+diff --git a/libs/vkd3d/libs/vkd3d-shader/ir.c b/libs/vkd3d/libs/vkd3d-shader/ir.c
+index bef7afa..96d824f 100644
+--- a/libs/vkd3d/libs/vkd3d-shader/ir.c
++++ b/libs/vkd3d/libs/vkd3d-shader/ir.c
+@@ -2445,6 +2445,105 @@ static enum vkd3d_result vsir_program_lower_dcl_output(struct vsir_program *prog
+     return VKD3D_OK;
+ }
+ 
++static uint32_t vsir_program_get_uint_parameter(struct vsir_program *program,
++        enum vkd3d_shader_parameter_name name)
++{
++    const struct vkd3d_shader_parameter1 *parameter;
++
++    if (!(parameter = vsir_program_get_parameter(program, name))
++            || parameter->type != VKD3D_SHADER_PARAMETER_TYPE_IMMEDIATE_CONSTANT
++            || parameter->data_type != VKD3D_SHADER_PARAMETER_DATA_TYPE_UINT32)
++        return 0;
++    return parameter->u.immediate_constant.u.u32;
++}
++
++/* Direct3D 9 reads integer vertex attributes (UBYTE4, SHORT2, SHORT4) as
++ * floats holding the integer values. Vulkan, and Metal in particular, needs
++ * the shader input to have the attribute's integer type, so declare those
++ * inputs as integers, convert them into a temp at the start, and read the
++ * temp everywhere else. */
++static enum vkd3d_result vsir_program_convert_sm1_integer_inputs(struct vsir_program *program,
++        struct vsir_transformation_context *ctx)
++{
++    struct vsir_program_iterator it = vsir_program_iterator(&program->instructions);
++    uint32_t uint_mask, sint_mask, used_mask = 0, temps[32];
++    struct vkd3d_shader_location loc = {0};
++    struct vkd3d_shader_instruction *ins;
++    unsigned int i, j, count = 0;
++
++    if (program->shader_version.type != VKD3D_SHADER_TYPE_VERTEX || program->shader_version.major >= 4)
++        return VKD3D_OK;
++    uint_mask = vsir_program_get_uint_parameter(program, VKD3D_SHADER_PARAMETER_NAME_SM1_UINT_INPUT_MASK);
++    sint_mask = vsir_program_get_uint_parameter(program, VKD3D_SHADER_PARAMETER_NAME_SM1_SINT_INPUT_MASK) & ~uint_mask;
++    if (!(uint_mask | sint_mask))
++        return VKD3D_OK;
++
++    for (i = 0; i < program->input_signature.element_count; ++i)
++    {
++        struct signature_element *e = &program->input_signature.elements[i];
++
++        if (e->register_index >= 32 || !((uint_mask | sint_mask) & (1u << e->register_index)))
++            continue;
++        e->component_type = (uint_mask & (1u << e->register_index))
++                ? VKD3D_SHADER_COMPONENT_UINT : VKD3D_SHADER_COMPONENT_INT;
++        used_mask |= 1u << e->register_index;
++    }
++    if (!used_mask)
++        return VKD3D_OK;
++    for (i = 0; i < 32; ++i)
++    {
++        if (used_mask & (1u << i))
++        {
++            temps[i] = program->temp_count++;
++            ++count;
++        }
++    }
++
++    for (ins = vsir_program_iterator_head(&it); ins; ins = vsir_program_iterator_next(&it))
++    {
++        for (j = 0; j < ins->src_count; ++j)
++        {
++            struct vkd3d_shader_register *reg = &ins->src[j].reg;
++
++            if (reg->type != VKD3DSPR_INPUT || reg->idx_count != 1 || reg->idx[0].rel_addr
++                    || reg->idx[0].offset >= 32 || !(used_mask & (1u << reg->idx[0].offset)))
++                continue;
++            reg->type = VKD3DSPR_TEMP;
++            reg->idx[0].offset = temps[reg->idx[0].offset];
++        }
++    }
++
++    for (ins = vsir_program_iterator_head(&it); ins; ins = vsir_program_iterator_next(&it))
++    {
++        if (!vsir_instruction_is_dcl(ins) && ins->opcode != VSIR_OP_LABEL && ins->opcode != VSIR_OP_NOP)
++        {
++            loc = ins->location;
++            break;
++        }
++    }
++    if (!(ins = vsir_program_iterator_insert_before_and_move(&it, count)))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++
++    for (i = 0; i < 32; ++i)
++    {
++        bool is_uint = uint_mask & (1u << i);
++
++        if (!(used_mask & (1u << i)))
++            continue;
++        if (!vsir_instruction_init_with_params(program, ins, &loc, is_uint ? VSIR_OP_UTOF : VSIR_OP_ITOF, 1, 1))
++            return VKD3D_ERROR_OUT_OF_MEMORY;
++        dst_param_init_temp_float4(&ins->dst[0], temps[i]);
++        ins->dst[0].write_mask = VKD3DSP_WRITEMASK_ALL;
++        vsir_src_param_init(&ins->src[0], VKD3DSPR_INPUT, is_uint ? VSIR_DATA_U32 : VSIR_DATA_I32, 1);
++        ins->src[0].reg.idx[0].offset = i;
++        ins->src[0].reg.dimension = VSIR_DIMENSION_VEC4;
++        ins->src[0].swizzle = VKD3D_SHADER_NO_SWIZZLE;
++        ins = vsir_program_iterator_next(&it);
++    }
++
++    return VKD3D_OK;
++}
++
+ static enum vkd3d_result vsir_program_lower_d3dbc_instructions(struct vsir_program *program,
+         struct vsir_transformation_context *ctx)
+ {
+@@ -14320,6 +14419,7 @@ enum vkd3d_result vsir_program_lower_d3dbc(struct vsir_program *program, uint64_
+     struct vsir_transformation_context ctx;
+ 
+     vsir_transformation_context_init(&ctx, program, config_flags, compile_info, message_context);
++    vsir_transform(&ctx, vsir_program_convert_sm1_integer_inputs);
+     vsir_transform(&ctx, vsir_program_lower_d3dbc_instructions);
+ 
+     if (program->shader_version.major == 1 && program->shader_version.type == VKD3D_SHADER_TYPE_PIXEL)

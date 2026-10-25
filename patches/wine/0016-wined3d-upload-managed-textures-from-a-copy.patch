@@ -1,0 +1,130 @@
+Subject: wined3d: upload managed textures from a copy, so locks do not wait
+Date: 2026-10-18
+Applies to: CrossOver 26.3.0 Wine sources, after 0015
+Files changed: dlls/wined3d/device.c
+
+d3d9 keeps a managed texture as a system memory copy, which the application
+locks, and a GPU copy for drawing. Before a draw, wined3d_device_update_texture()
+queued a blit from the system memory copy to the GPU copy. That blit kept the
+system memory copy in use until the command thread reached it, and locking the
+texture waits for that (wined3d_resource_wait_idle()). BO1 rewrites a managed
+volume texture every frame, so each LockBox waited for the previous frame's
+queued work: about 6 ms per call, a quarter of the game thread's time in a
+match. The dirty boxes of a managed texture's system memory copy are now
+copied into an upload buffer when the draw is queued
+(wined3d_device_context_emit_update_sub_resource()), and nothing queued refers
+to the copy any more. Only the application writes to that copy, so reading it
+on the application's thread is safe. Other textures keep the blit.
+
+Test: tests/src/d3d9-managed-volume-test.c (LockBox time and the last colour)
+Review fixes (2026-10-24):
+- Formats whose map pitch is not their storage pitch (ATI1N, ATI2N) keep
+  the blit: the copy read them at the wrong stride (the bottom block row of
+  an ATI2N texture came out corrupted).
+- The copy is taken only while no queued command-stream work uses the
+  system memory copy.
+- The full box used when a texture has too many dirty boxes is the source's
+  top level, not the level numbered like the layer.
+Test: tests/src/d3d9-managed-formats-test.c, tests/src/d3d9-ati2n-test.c
+(OpenGL renderer: the Vulkan renderer has no ATI2N).
+License: LGPL-2.1-or-later, like the Wine files it modifies.
+---
+diff --git a/dlls/wined3d/device.c b/dlls/wined3d/device.c
+index 7f1bfc5..a096909 100644
+--- a/dlls/wined3d/device.c
++++ b/dlls/wined3d/device.c
+@@ -3823,6 +3823,58 @@ void CDECL wined3d_device_context_get_primitive_type(const struct wined3d_device
+     TRACE("Returning %s.\n", debug_d3dprimitivetype(*primitive_type));
+ }
+ 
++/* Whether queued command-stream work still uses the resource (as in
++ * wined3d_resource_wait_idle(), without waiting). */
++static BOOL wined3d_resource_has_queued_access(const struct wined3d_resource *resource)
++{
++    const struct wined3d_cs *cs = resource->device->cs;
++    ULONG head, tail;
++
++    if (!cs->thread || cs->thread_id == GetCurrentThreadId())
++        return FALSE;
++    head = cs->queue[WINED3D_CS_QUEUE_DEFAULT].head;
++    tail = *(volatile ULONG *)&cs->queue[WINED3D_CS_QUEUE_DEFAULT].tail;
++    return head != tail && wined3d_ge_wrap(head, resource->access_time) && !wined3d_ge_wrap(tail, resource->access_time);
++}
++
++/* Upload one box of a d3d9 managed texture's system memory copy through an
++ * upload buffer filled here, instead of a blit that reads the copy later. A
++ * queued blit keeps the copy in use until the command thread runs it, and
++ * locking the texture waits for that, which costs games that rewrite a
++ * managed texture every frame. Only the application writes to a managed
++ * texture's copy, so reading it on the application's thread is safe. */
++static void wined3d_device_upload_managed_box(struct wined3d_device *device,
++        struct wined3d_texture *dst_texture, unsigned int dst_sub_resource_idx,
++        struct wined3d_texture *src_texture, unsigned int src_sub_resource_idx, const struct wined3d_box *box)
++{
++    struct wined3d_texture_sub_resource *sub_resource;
++    unsigned int row_pitch, slice_pitch;
++    struct wined3d_bo_address data;
++
++    sub_resource = &src_texture->sub_resources[src_sub_resource_idx];
++    /* Not for formats whose map pitch is not their storage pitch (ATI1N,
++     * ATI2N), and not while queued work may still write the copy. */
++    if (src_texture->resource.usage & WINED3DUSAGE_MANAGED
++            && sub_resource->locations & WINED3D_LOCATION_SYSMEM
++            && !(src_texture->resource.format_attrs & WINED3D_FORMAT_ATTR_BROKEN_PITCH)
++            && !wined3d_resource_has_queued_access(&src_texture->resource))
++    {
++        wined3d_texture_get_bo_address(src_texture, src_sub_resource_idx, &data, WINED3D_LOCATION_SYSMEM);
++        if (!data.buffer_object && data.addr)
++        {
++            wined3d_resource_get_sub_resource_map_pitch(&src_texture->resource,
++                    src_sub_resource_idx, &row_pitch, &slice_pitch);
++            wined3d_device_context_emit_update_sub_resource(&device->cs->c, &dst_texture->resource,
++                    dst_sub_resource_idx, box, resource_offset_map_pointer(&src_texture->resource,
++                    src_sub_resource_idx, data.addr, box), row_pitch, slice_pitch);
++            return;
++        }
++    }
++
++    wined3d_device_context_emit_blt_sub_resource(&device->cs->c, &dst_texture->resource, dst_sub_resource_idx,
++            box, &src_texture->resource, src_sub_resource_idx, box, 0, NULL, WINED3D_TEXF_POINT);
++}
++
+ HRESULT CDECL wined3d_device_update_texture(struct wined3d_device *device,
+         struct wined3d_texture *src_texture, struct wined3d_texture *dst_texture)
+ {
+@@ -3918,10 +3970,8 @@ HRESULT CDECL wined3d_device_update_texture(struct wined3d_device *device,
+             wined3d_texture_get_level_box(dst_texture, i, &box);
+             for (j = 0; j < layer_count; ++j)
+             {
+-                wined3d_device_context_emit_blt_sub_resource(&device->cs->c,
+-                        &dst_texture->resource, j * dst_level_count + i, &box,
+-                        &src_texture->resource, j * src_level_count + i + src_skip_levels, &box,
+-                        0, NULL, WINED3D_TEXF_POINT);
++                wined3d_device_upload_managed_box(device, dst_texture, j * dst_level_count + i,
++                        src_texture, j * src_level_count + i + src_skip_levels, &box);
+             }
+         }
+     }
+@@ -3939,7 +3989,8 @@ HRESULT CDECL wined3d_device_update_texture(struct wined3d_device *device,
+             {
+                 boxes = &b;
+                 box_count = 1;
+-                wined3d_texture_get_level_box(dst_texture, i, &b);
++                /* Dirty boxes are in the source's top level. */
++                wined3d_texture_get_level_box(src_texture, 0, &b);
+             }
+ 
+             for (j = 0; j < level_count; ++j)
+@@ -3964,10 +4015,8 @@ HRESULT CDECL wined3d_device_update_texture(struct wined3d_device *device,
+                                 wined3d_texture_get_level_depth(src_texture, src_level));
+                     }
+ 
+-                    wined3d_device_context_emit_blt_sub_resource(&device->cs->c,
+-                            &dst_texture->resource, i * dst_level_count + j, &box,
+-                            &src_texture->resource, i * src_level_count + src_level, &box,
+-                            0, NULL, WINED3D_TEXF_POINT);
++                    wined3d_device_upload_managed_box(device, dst_texture, i * dst_level_count + j,
++                            src_texture, i * src_level_count + src_level, &box);
+                 }
+             }
+         }

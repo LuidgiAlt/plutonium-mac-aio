@@ -1,0 +1,27 @@
+Subject: wined3d: support Direct3D 9 luminance formats on Vulkan
+Date: 2026-10-13
+Applies to: CrossOver 26.3.0 Wine sources, after 0006
+Files changed: dlls/wined3d/utils.c
+
+L8, L8A8 and L16 had no Vulkan format, so CreateTexture failed and games that
+do not check the result, like BO1, crashed on the missing texture. They are
+stored as R8, R8G8 and R16 with the channel remapping the OpenGL path uses
+(XXX1, XXXY).
+
+Test: tests/src/d3d9-format-test.c
+License: LGPL-2.1-or-later, like the Wine files it modifies.
+---
+diff --git a/dlls/wined3d/utils.c b/dlls/wined3d/utils.c
+index 967ea27..15aba94 100644
+--- a/dlls/wined3d/utils.c
++++ b/dlls/wined3d/utils.c
+@@ -4160,6 +4160,9 @@ static void init_vulkan_format_info(struct wined3d_adapter *adapter, struct wine
+         {WINED3DFMT_R8_SNORM,                   VK_FORMAT_R8_SNORM,                },
+         {WINED3DFMT_R8_SINT,                    VK_FORMAT_R8_SINT,                 },
+         {WINED3DFMT_A8_UNORM,                   VK_FORMAT_R8_UNORM,                "000X"},
++        {WINED3DFMT_L8_UNORM,                   VK_FORMAT_R8_UNORM,                "XXX1"},
++        {WINED3DFMT_L8A8_UNORM,                 VK_FORMAT_R8G8_UNORM,              "XXXY"},
++        {WINED3DFMT_L16_UNORM,                  VK_FORMAT_R16_UNORM,               "XXX1"},
+         {WINED3DFMT_B8G8R8A8_UNORM,             VK_FORMAT_B8G8R8A8_UNORM,          },
+         {WINED3DFMT_B8G8R8A8_UNORM_SRGB,        VK_FORMAT_B8G8R8A8_SRGB,           },
+         {WINED3DFMT_B8G8R8X8_UNORM,             VK_FORMAT_B8G8R8A8_UNORM,          "XYZ1"},

@@ -1,0 +1,145 @@
+Subject: wined3d: send only changed shader constants; upload the whole buffer on the command thread
+Date: 2026-10-18
+Applies to: CrossOver 26.3.0 Wine sources, after 0017 (changes the code from 0010)
+Files changed: dlls/wined3d/cs.c, wined3d_private.h
+
+Patch 0010 uploads the whole push constant buffer for every change, so that
+Vulkan does not end the render pass for a partial GPU copy. It copied the
+whole buffer (4 KiB for vertex shader constants) into a new allocation on the
+application's thread. BO1 changes constants about 100,000 times per second,
+and its game thread is the limit. The push constants op now carries only the
+changed bytes. The command thread, which waits for work most of the time,
+keeps its own copy of each buffer, applies the bytes and uploads the whole
+buffer, so the render pass is still not ended. The first update of a buffer
+sends all of it, so both copies start equal, also after a device reset.
+
+Test: tests/src/d3d9-constants-test.c (4096 draws, each with its own vertex and
+pixel shader constants), and the other tests/src/d3d9-*-test.c
+License: LGPL-2.1-or-later, like the Wine files it modifies.
+---
+--- a/dlls/wined3d/wined3d_private.h
++++ b/dlls/wined3d/wined3d_private.h
+@@ -3712,6 +3712,10 @@
+ struct wined3d_cs
+ {
+     struct wined3d_device_context c;
++
++    /* The command thread's copy of each push constant buffer; see
++     * wined3d_device_context_push_constants(). */
++    uint8_t *push_constant_data[WINED3D_PUSH_CONSTANTS_COUNT];
+ 
+     struct wined3d_state state;
+     HMODULE wined3d_module;
+--- a/dlls/wined3d/cs.c
++++ b/dlls/wined3d/cs.c
+@@ -418,6 +418,11 @@
+     unsigned int start_idx;
+     unsigned int count;
+     uint32_t update_mask;
++    /* With data_size: the changed bytes, applied to the command thread's copy
++     * of "buffer", which is then uploaded whole. */
++    struct wined3d_buffer *buffer;
++    unsigned int data_offset, data_size;
++    uint8_t data[1];
+ };
+ 
+ struct wined3d_cs_reset_state
+@@ -2207,6 +2212,26 @@
+     unsigned int ffp_start_idx, ffp_end_idx;
+     unsigned int context_count, i;
+ 
++    if (op->data_size)
++    {
++        unsigned int size = op->buffer->resource.size;
++        struct wined3d_context *context;
++        struct upload_bo bo;
++
++        if (!cs->push_constant_data[op->type] && !(cs->push_constant_data[op->type] = calloc(1, size)))
++        {
++            ERR("Failed to allocate push constant data.\n");
++            return;
++        }
++        memcpy(cs->push_constant_data[op->type] + op->data_offset, op->data, op->data_size);
++        bo.addr.buffer_object = NULL;
++        bo.addr.addr = cs->push_constant_data[op->type];
++        bo.flags = 0;
++        context = context_acquire(device, NULL, 0);
++        wined3d_buffer_update_sub_resource(op->buffer, context, &bo, 0, size);
++        context_release(context);
++    }
++
+     /* The constant buffers were already updated; this op is just to mark the
+      * constants as invalid in the device state. */
+ 
+@@ -2233,12 +2258,39 @@
+     struct wined3d_cs_push_constants *op;
+ 
+     op = wined3d_device_context_require_space(&cs->c, sizeof(*op), WINED3D_CS_QUEUE_DEFAULT);
++    op->opcode = WINED3D_CS_OP_PUSH_CONSTANTS;
++    op->type = type;
++    op->update_mask = update_mask;
++    op->start_idx = start_idx;
++    op->count = count;
++    op->buffer = NULL;
++    op->data_size = 0;
++
++    wined3d_device_context_submit(&cs->c, WINED3D_CS_QUEUE_DEFAULT);
++}
++
++/* Send the changed bytes with the push constants op; the command thread
++ * updates its copy of the buffer and uploads all of it. */
++static void wined3d_device_context_emit_push_constants_data(struct wined3d_device_context *context,
++        enum wined3d_push_constants type, uint32_t update_mask, unsigned int start_idx, unsigned int count,
++        struct wined3d_buffer *buffer, unsigned int data_offset, unsigned int data_size, const void *data)
++{
++    struct wined3d_cs *cs = wined3d_cs_from_context(context);
++    struct wined3d_cs_push_constants *op;
++
++    op = wined3d_device_context_require_space(&cs->c,
++            FIELD_OFFSET(struct wined3d_cs_push_constants, data[data_size]), WINED3D_CS_QUEUE_DEFAULT);
+     op->opcode = WINED3D_CS_OP_PUSH_CONSTANTS;
+     op->type = type;
+     op->update_mask = update_mask;
+     op->start_idx = start_idx;
+     op->count = count;
++    op->buffer = buffer;
++    op->data_offset = data_offset;
++    op->data_size = data_size;
++    memcpy(op->data, data, data_size);
+ 
++    wined3d_device_context_reference_resource(&cs->c, &buffer->resource);
+     wined3d_device_context_submit(&cs->c, WINED3D_CS_QUEUE_DEFAULT);
+ }
+ 
+@@ -2269,11 +2321,17 @@
+             return;
+ 
+         memcpy(data + byte_offset, constants, byte_size);
+-        data[resource->size] = 1;
+-        wined3d_box_set(&box, 0, 0, resource->size, 1, 0, 1);
+-        wined3d_device_context_emit_update_sub_resource(context, resource, 0, &box,
+-                context->device->push_constant_data[type], resource->size, resource->size);
+-        wined3d_device_context_emit_push_constants(context, type, update_mask, start_idx, count);
++        /* Send only the changed bytes; the command thread keeps a copy of
++         * the buffer and uploads all of it. The first update sends the
++         * whole buffer, so that both copies start equal. */
++        if (!data[resource->size])
++        {
++            data[resource->size] = 1;
++            byte_offset = 0;
++            byte_size = resource->size;
++        }
++        wined3d_device_context_emit_push_constants_data(context, type, update_mask, start_idx, count,
++                context->device->push_constants[type], byte_offset, byte_size, data + byte_offset);
+         return;
+     }
+ 
+@@ -3774,6 +3832,8 @@
+ 
+     wined3d_state_destroy(cs->c.state);
+     state_cleanup(&cs->state);
++    for (unsigned int i = 0; i < ARRAY_SIZE(cs->push_constant_data); ++i)
++        free(cs->push_constant_data[i]);
+     free(cs->data);
+     free(cs);
+ }

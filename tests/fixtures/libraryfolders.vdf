@@ -1,0 +1,13 @@
+"libraryfolders"
+{
+	"0"
+	{
+		"path"		"LIBRARY_ONE"
+		"label"		""
+	}
+	"1"
+	{
+		"path"		"LIBRARY_TWO"
+		"label"		"External"
+	}
+}

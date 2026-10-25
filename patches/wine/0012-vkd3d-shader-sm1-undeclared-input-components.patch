@@ -1,0 +1,85 @@
+Subject: vkd3d-shader: accept undeclared input components in shader model 1-3
+Date: 2026-10-13
+Applies to: CrossOver 26.3.0 Wine sources, after 0011
+Files changed: libs/vkd3d/libs/vkd3d-shader/ir.c
+
+Direct3D 9 shaders may read components of an input register that its dcl does
+not include. The I/O normaliser looked the register up by component and
+failed ("Unable to resolve I/O register to a signature element"); for shader
+model 1-3 it now falls back to the register alone. The error message names
+the register.
+
+Review fixes (2026-10-24): undeclared components used to read copies of the
+declared ones (v0.xy declared, v0.zw read back x and y), and a scalar read
+past the declared vector was out of bounds. A shader model 1-3 input declared
+with fewer than four components is now kept in a private vec4 that starts as
+(0, 0, 0, 1) (Direct3D 9 leaves the values undefined; hardware interpolates
+the whole register, DXVK reads 0). Test: tests/src/d3d9-undeclared-test.c.
+License: LGPL-2.1-or-later, like the Wine files it modifies.
+---
+diff --git a/libs/vkd3d/libs/vkd3d-shader/ir.c b/libs/vkd3d/libs/vkd3d-shader/ir.c
+index 96d824f..9a21fce 100644
+--- a/libs/vkd3d/libs/vkd3d-shader/ir.c
++++ b/libs/vkd3d/libs/vkd3d-shader/ir.c
+@@ -4267,10 +4267,15 @@ static void shader_src_param_io_normalise(struct vkd3d_shader_src_param *src_par
+ 
+     id_idx = reg->idx_count - 1;
+     write_mask = VKD3DSP_WRITEMASK_0 << vsir_swizzle_get_component(src_param->swizzle, 0);
+-    if (!shader_signature_find_element_for_reg(signature, reg_idx, write_mask, &element_idx))
++    /* Shader model 1-3 shaders may read components of an input that its
++     * declaration does not include; match on the register alone then. */
++    if (!shader_signature_find_element_for_reg(signature, reg_idx, write_mask, &element_idx)
++            && (normaliser->major >= 4 || !shader_signature_find_element_for_reg(signature, reg_idx, 0, &element_idx)))
+     {
+         vkd3d_shader_error(normaliser->message_context, &ins->location, VKD3D_SHADER_ERROR_VSIR_INVALID_SIGNATURE,
+-                "Unable to resolve I/O register to a signature element.");
++                "Unable to resolve I/O register to a signature element (type %#x, register %u, mask %#x, "
++                "shader type %#x, version %u, opcode %#x).", reg->type, reg_idx, write_mask,
++                normaliser->shader_type, normaliser->major, ins->opcode);
+         normaliser->result = VKD3D_ERROR_INVALID_SHADER;
+         return;
+     }
+diff --git a/libs/vkd3d/libs/vkd3d-shader/spirv.c b/libs/vkd3d/libs/vkd3d-shader/spirv.c
+index c4ddc8e..d832250 100644
+--- a/libs/vkd3d/libs/vkd3d-shader/spirv.c
++++ b/libs/vkd3d/libs/vkd3d-shader/spirv.c
+@@ -5649,7 +5649,7 @@ static void spirv_compiler_emit_input(struct spirv_compiler *compiler,
+     struct vkd3d_symbol reg_symbol;
+     enum vsir_data_type data_type;
+     SpvStorageClass storage_class;
+-    bool use_private_var = false;
++    bool use_private_var = false, fill_defaults;
+     unsigned int array_sizes[2];
+ 
+     shader_signature = reg_type == VKD3DSPR_PATCHCONST
+@@ -5707,7 +5707,14 @@ static void spirv_compiler_emit_input(struct spirv_compiler *compiler,
+ 
+     component_idx = vsir_write_mask_get_component_idx(write_mask);
+ 
+-    if (needs_private_io_variable(builtin))
++    /* Shader model 1-3 shaders may read input components their dcl does not
++     * include. Keep such an input in a private vec4 that starts as
++     * (0, 0, 0, 1), so those reads get these defaults, not other
++     * components (or an out-of-bounds access). */
++    fill_defaults = compiler->program->shader_version.major < 4 && !builtin
++            && write_mask != VKD3DSP_WRITEMASK_ALL && !array_sizes[0] && !array_sizes[1];
++
++    if (needs_private_io_variable(builtin) || fill_defaults)
+     {
+         use_private_var = true;
+         reg_write_mask = write_mask;
+@@ -5782,6 +5789,14 @@ static void spirv_compiler_emit_input(struct spirv_compiler *compiler,
+         vsir_register_init(&dst_reg, reg_type, VSIR_DATA_F32, 1);
+         dst_reg.idx[0].offset = element_idx;
+ 
++        if (fill_defaults)
++        {
++            static const float defaults[VKD3D_VEC4_SIZE] = {0.0f, 0.0f, 0.0f, 1.0f};
++
++            vkd3d_spirv_build_op_store(builder, var_id, spirv_compiler_get_constant(compiler,
++                    VSIR_DATA_F32, VKD3D_VEC4_SIZE, (const uint32_t *)defaults), SpvMemoryAccessMaskNone);
++        }
++
+         type_id = spirv_get_type_id(compiler, data_type, input_component_count);
+ 
+         val_id = vkd3d_spirv_build_op_load(builder, type_id, input_id, SpvMemoryAccessMaskNone);

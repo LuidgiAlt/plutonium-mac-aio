@@ -1,0 +1,16 @@
+#!/bin/bash
+# Before each commit: syntax and shellcheck on every script, then the shell
+# tests. Enable with: git config core.hooksPath .githooks
+set -u
+root=$(git rev-parse --show-toplevel)
+cd "$root" || exit 1
+status=0
+scripts=$(git ls-files '*.sh' .githooks/pre-commit setup.sh launch.sh 2>/dev/null | sort -u)
+for s in $scripts; do
+  [ -f "$s" ] || continue
+  bash -n "$s" || status=1
+done
+# shellcheck disable=SC2086
+shellcheck -S warning -x --source-path=SCRIPTDIR --source-path="$root" $scripts || status=1
+tests/sh/run.sh > /tmp/aio-pre-commit.log 2>&1 || { tail -20 /tmp/aio-pre-commit.log; status=1; }
+exit $status

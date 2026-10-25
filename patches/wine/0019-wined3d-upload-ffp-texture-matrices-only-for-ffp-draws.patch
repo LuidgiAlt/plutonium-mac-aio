@@ -1,0 +1,54 @@
+Subject: wined3d: upload fixed-function texture matrices only for fixed-function draws
+Date: 2026-10-18
+Applies to: CrossOver 26.3.0 Wine sources, after 0018
+Files changed: dlls/wined3d/stateblock.c
+
+wined3d marks the texture matrices changed with every vertex declaration
+change, because the fixed-function vertex pipeline reads them according to
+the texture coordinate formats. wined3d_device_apply_stateblock() then built
+all eight matrices and uploaded them. BO1 changes vertex declarations about
+10,000 times per second with a vertex shader bound, which never reads them:
+about 35 ms per second of the game's thread. While a vertex shader is bound,
+the change is now only remembered, and the matrices are uploaded with the
+next draw that uses the fixed-function vertex pipeline.
+
+Test: tests/src/d3d9-texmatrix-test.c (a matrix set while a vertex shader is
+bound applies to the next fixed-function draw), and the other
+tests/src/d3d9-*-test.c
+License: LGPL-2.1-or-later, like the Wine files it modifies.
+---
+--- a/dlls/wined3d/stateblock.c
++++ b/dlls/wined3d/stateblock.c
+@@ -87,6 +87,9 @@
+     enum wined3d_stateblock_type type;
+ 
+     struct wined3d_saved_states changed;
++    /* Texture matrices changed while a vertex shader was bound; uploaded with
++     * the next draw that uses the fixed-function vertex pipeline. */
++    bool texture_matrices_pending;
+ 
+     struct wined3d_stateblock_state stateblock_state;
+     struct wined3d_light_state light_state;
+@@ -3959,10 +3962,21 @@
+         }
+     }
+ 
+-    if (changed->texture_matrices)
++    /* Texture matrices feed only the fixed-function vertex pipeline, but they
++     * are marked changed with every vertex declaration change, which games
++     * can do thousands of times per second with a vertex shader bound. While
++     * a vertex shader is bound, only remember the change, and build and
++     * upload the eight matrices for the next draw without a vertex shader,
++     * the only kind that reads them. */
++    if (changed->texture_matrices && state->vs)
+     {
++        stateblock->texture_matrices_pending = true;
++    }
++    else if (changed->texture_matrices || (stateblock->texture_matrices_pending && !state->vs))
++    {
+         struct wined3d_ffp_vs_constants constants;
+ 
++        stateblock->texture_matrices_pending = false;
+         for (i = 0; i < WINED3D_MAX_FFP_TEXTURES; ++i)
+             get_texture_matrix(state, i, &constants.texture_matrices[i]);
+         wined3d_device_context_push_constants(context,

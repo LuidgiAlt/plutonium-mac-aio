@@ -1,0 +1,270 @@
+Subject: vkd3d-shader: lower Direct3D 9 pow, dp2add, nrm and lrp for SPIR-V
+Date: 2026-10-13
+Applies to: CrossOver 26.3.0 Wine sources, after 0005
+Files changed: libs/vkd3d/libs/vkd3d-shader/ir.c
+
+The SPIR-V backend has no implementation of these shader model 1-3
+instructions, so shaders using them failed to compile ("Unhandled
+instruction") and wined3d skipped every draw that used them. Lowered in the
+d3dbc pass:
+
+  pow x, y        -> exp2(y * log2(|x|))
+  dp2add a, b, c  -> dp2 a, b; add c
+  nrm v           -> v * rsq(dp3(v, v))
+  lrp a, b, c     -> mad(a, b - c, c)
+
+Test: tests/src/d3d9-shader-test.c, tests/src/d3d9-shader-test2.c
+Review fixes (2026-10-24): pow clamps log2(|x|) at -FLT_MAX, so pow(0, 0) is
+1 instead of NaN; nrm clamps rsq at FLT_MAX, so a zero vector stays zero (as
+wined3d's GLSL backend) instead of NaN. NaN pixels spread through blending
+and post-processing. Test: tests/src/d3d9-math-edge-test.c.
+License: LGPL-2.1-or-later, like the Wine files it modifies.
+---
+diff --git a/libs/vkd3d/libs/vkd3d-shader/ir.c b/libs/vkd3d/libs/vkd3d-shader/ir.c
+index 6a1c530..45c68f3 100644
+--- a/libs/vkd3d/libs/vkd3d-shader/ir.c
++++ b/libs/vkd3d/libs/vkd3d-shader/ir.c
+@@ -19,6 +19,7 @@
+ 
+ #include "vkd3d_shader_private.h"
+ #include "vkd3d_types.h"
++#include <float.h>
+ 
+ struct vsir_transformation_context
+ {
+@@ -868,6 +869,12 @@ static void src_param_init_const_uint(struct vkd3d_shader_src_param *src, uint32
+     src->reg.u.immconst_u32[0] = value;
+ }
+ 
++static void src_param_init_const_float(struct vkd3d_shader_src_param *src, float value)
++{
++    vsir_src_param_init(src, VKD3DSPR_IMMCONST, VSIR_DATA_F32, 0);
++    src->reg.u.immconst_f32[0] = value;
++}
++
+ static void vsir_src_param_init_io(struct vkd3d_shader_src_param *src,
+         enum vkd3d_shader_register_type reg_type, const struct signature_element *e, unsigned int idx_count)
+ {
+@@ -1640,6 +1647,199 @@ static enum vkd3d_result vsir_program_lower_sm1_sincos(struct vsir_program *prog
+     return VKD3D_OK;
+ }
+ 
++/* d3dbc "pow dst, src0, src1" computes |src0|^src1 on replicated scalars.
++ * Lower it to exp2(src1 * max(log2(|src0|), -FLT_MAX)), which is how SM1-3
++ * hardware evaluates it, for backends without a native pow. The clamp keeps
++ * pow(0, 0) at 1 instead of exp2(0 * -inf) = NaN. */
++static enum vkd3d_result vsir_program_lower_sm1_pow(struct vsir_program *program,
++        struct vsir_program_iterator *it)
++{
++    struct vkd3d_shader_instruction *pow, *log, *max, *mul, *exp;
++    unsigned int log_idx, max_idx, mul_idx, s;
++
++    pow = vsir_program_iterator_current(it);
++    switch (pow->src[0].modifiers)
++    {
++        case VKD3DSPSM_NONE:
++        case VKD3DSPSM_NEG:
++        case VKD3DSPSM_ABS:
++        case VKD3DSPSM_ABSNEG:
++            break;
++        default:
++            return VKD3D_ERROR_NOT_IMPLEMENTED;
++    }
++
++    if (!vsir_program_iterator_insert_after(it, 4))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    pow = vsir_program_iterator_current(it);
++    log_idx = program->ssa_count++;
++    max_idx = program->ssa_count++;
++    mul_idx = program->ssa_count++;
++
++    log = vsir_program_iterator_next(it);
++    if (!vsir_instruction_init_with_params(program, log, &pow->location, VSIR_OP_LOG, 1, 1))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    log->src[0] = pow->src[0];
++    log->src[0].modifiers = VKD3DSPSM_ABS;
++    s = vsir_swizzle_get_component(pow->src[0].swizzle, 0);
++    log->src[0].swizzle = vkd3d_shader_create_swizzle(s, s, s, s);
++    dst_param_init_ssa_scalar(&log->dst[0], log_idx, pow->src[0].reg.data_type);
++
++    max = vsir_program_iterator_next(it);
++    if (!vsir_instruction_init_with_params(program, max, &pow->location, VSIR_OP_MAX, 1, 2))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    src_param_init_ssa_scalar(&max->src[0], log_idx, pow->src[0].reg.data_type);
++    src_param_init_const_float(&max->src[1], -FLT_MAX);
++    dst_param_init_ssa_scalar(&max->dst[0], max_idx, pow->src[0].reg.data_type);
++
++    mul = vsir_program_iterator_next(it);
++    if (!vsir_instruction_init_with_params(program, mul, &pow->location, VSIR_OP_MUL, 1, 2))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    src_param_init_ssa_scalar(&mul->src[0], max_idx, pow->src[0].reg.data_type);
++    mul->src[1] = pow->src[1];
++    s = vsir_swizzle_get_component(pow->src[1].swizzle, 0);
++    mul->src[1].swizzle = vkd3d_shader_create_swizzle(s, s, s, s);
++    dst_param_init_ssa_scalar(&mul->dst[0], mul_idx, pow->src[0].reg.data_type);
++
++    exp = vsir_program_iterator_next(it);
++    if (!vsir_instruction_init_with_params(program, exp, &pow->location, VSIR_OP_EXP, 1, 1))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    exp->flags = pow->flags;
++    src_param_init_ssa_scalar(&exp->src[0], mul_idx, pow->src[0].reg.data_type);
++    exp->dst[0] = pow->dst[0];
++
++    vkd3d_shader_instruction_make_nop(pow);
++    return VKD3D_OK;
++}
++
++/* d3dbc "nrm dst, src" normalises src.xyz. Lower it to
++ * src * min(rsq(dot(src.xyz, src.xyz)), FLT_MAX): the clamp leaves a zero
++ * vector zero, as wined3d's GLSL backend does, instead of 0 * inf = NaN. */
++static enum vkd3d_result vsir_program_lower_nrm(struct vsir_program *program,
++        struct vsir_program_iterator *it)
++{
++    struct vkd3d_shader_instruction *nrm, *dp3, *rsq, *min, *mul;
++    unsigned int dot_idx, rsq_idx, min_idx;
++
++    if (!vsir_program_iterator_insert_after(it, 4))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    nrm = vsir_program_iterator_current(it);
++    dot_idx = program->ssa_count++;
++    rsq_idx = program->ssa_count++;
++    min_idx = program->ssa_count++;
++
++    dp3 = vsir_program_iterator_next(it);
++    if (!vsir_instruction_init_with_params(program, dp3, &nrm->location, VSIR_OP_DP3, 1, 2))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    dp3->src[0] = nrm->src[0];
++    dp3->src[1] = nrm->src[0];
++    dst_param_init_ssa_float(&dp3->dst[0], dot_idx);
++
++    rsq = vsir_program_iterator_next(it);
++    if (!vsir_instruction_init_with_params(program, rsq, &nrm->location, VSIR_OP_RSQ, 1, 1))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    src_param_init_ssa_float(&rsq->src[0], dot_idx);
++    dst_param_init_ssa_float(&rsq->dst[0], rsq_idx);
++
++    min = vsir_program_iterator_next(it);
++    if (!vsir_instruction_init_with_params(program, min, &nrm->location, VSIR_OP_MIN, 1, 2))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    src_param_init_ssa_float(&min->src[0], rsq_idx);
++    src_param_init_const_float(&min->src[1], FLT_MAX);
++    dst_param_init_ssa_float(&min->dst[0], min_idx);
++
++    mul = vsir_program_iterator_next(it);
++    if (!vsir_instruction_init_with_params(program, mul, &nrm->location, VSIR_OP_MUL, 1, 2))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    mul->flags = nrm->flags;
++    mul->src[0] = nrm->src[0];
++    src_param_init_ssa_float(&mul->src[1], min_idx);
++    mul->dst[0] = nrm->dst[0];
++
++    vkd3d_shader_instruction_make_nop(nrm);
++    return VKD3D_OK;
++}
++
++/* d3dbc "lrp dst, src0, src1, src2" is src0 * src1 + (1 - src0) * src2.
++ * Lower it to mad(src0, src1 - src2, src2). */
++static enum vkd3d_result vsir_program_lower_lrp(struct vsir_program *program,
++        struct vsir_program_iterator *it)
++{
++    struct vkd3d_shader_instruction *lrp, *sub, *mad;
++    enum vkd3d_shader_src_modifier neg;
++    unsigned int diff_idx;
++
++    lrp = vsir_program_iterator_current(it);
++    switch (lrp->src[2].modifiers)
++    {
++        case VKD3DSPSM_NONE:   neg = VKD3DSPSM_NEG;    break;
++        case VKD3DSPSM_NEG:    neg = VKD3DSPSM_NONE;   break;
++        case VKD3DSPSM_ABS:    neg = VKD3DSPSM_ABSNEG; break;
++        case VKD3DSPSM_ABSNEG: neg = VKD3DSPSM_ABS;    break;
++        default:
++            return VKD3D_ERROR_NOT_IMPLEMENTED;
++    }
++
++    if (!vsir_program_iterator_insert_after(it, 2))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    lrp = vsir_program_iterator_current(it);
++    diff_idx = program->ssa_count++;
++
++    sub = vsir_program_iterator_next(it);
++    if (!vsir_instruction_init_with_params(program, sub, &lrp->location, VSIR_OP_ADD, 1, 2))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    sub->src[0] = lrp->src[1];
++    sub->src[1] = lrp->src[2];
++    sub->src[1].modifiers = neg;
++    dst_param_init_ssa_float4(&sub->dst[0], diff_idx);
++
++    mad = vsir_program_iterator_next(it);
++    if (!vsir_instruction_init_with_params(program, mad, &lrp->location, VSIR_OP_MAD, 1, 3))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    mad->flags = lrp->flags;
++    mad->src[0] = lrp->src[0];
++    src_param_init_ssa_float4(&mad->src[1], diff_idx);
++    mad->src[2] = lrp->src[2];
++    mad->dst[0] = lrp->dst[0];
++
++    vkd3d_shader_instruction_make_nop(lrp);
++    return VKD3D_OK;
++}
++
++/* d3dbc "dp2add dst, src0, src1, src2" is dot(src0.xy, src1.xy) + src2,
++ * replicated. Lower it to dp2 followed by add. */
++static enum vkd3d_result vsir_program_lower_dp2add(struct vsir_program *program,
++        struct vsir_program_iterator *it)
++{
++    struct vkd3d_shader_instruction *dp2add, *dp2, *add;
++    unsigned int dp_idx, s;
++
++    if (!vsir_program_iterator_insert_after(it, 2))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    dp2add = vsir_program_iterator_current(it);
++    dp_idx = program->ssa_count++;
++
++    dp2 = vsir_program_iterator_next(it);
++    if (!vsir_instruction_init_with_params(program, dp2, &dp2add->location, VSIR_OP_DP2, 1, 2))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    dp2->src[0] = dp2add->src[0];
++    dp2->src[1] = dp2add->src[1];
++    dst_param_init_ssa_scalar(&dp2->dst[0], dp_idx, dp2add->src[0].reg.data_type);
++
++    add = vsir_program_iterator_next(it);
++    if (!vsir_instruction_init_with_params(program, add, &dp2add->location, VSIR_OP_ADD, 1, 2))
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    add->flags = dp2add->flags;
++    src_param_init_ssa_scalar(&add->src[0], dp_idx, dp2add->src[0].reg.data_type);
++    add->src[1] = dp2add->src[2];
++    s = vsir_swizzle_get_component(dp2add->src[2].swizzle, 0);
++    add->src[1].swizzle = vkd3d_shader_create_swizzle(s, s, s, s);
++    add->dst[0] = dp2add->dst[0];
++
++    vkd3d_shader_instruction_make_nop(dp2add);
++    return VKD3D_OK;
++}
++
+ static enum vkd3d_result vsir_program_lower_sm4_sincos(struct vsir_program *program,
+         struct vsir_program_iterator *it, struct vsir_transformation_context *ctx)
+ {
+@@ -2271,6 +2471,22 @@ static enum vkd3d_result vsir_program_lower_d3dbc_instructions(struct vsir_progr
+                 ret = vsir_program_lower_sm1_sincos(program, &it);
+                 break;
+ 
++            case VSIR_OP_POW:
++                ret = vsir_program_lower_sm1_pow(program, &it);
++                break;
++
++            case VSIR_OP_DP2ADD:
++                ret = vsir_program_lower_dp2add(program, &it);
++                break;
++
++            case VSIR_OP_NRM:
++                ret = vsir_program_lower_nrm(program, &it);
++                break;
++
++            case VSIR_OP_LRP:
++                ret = vsir_program_lower_lrp(program, &it);
++                break;
++
+             case VSIR_OP_TEXBEM:
+             case VSIR_OP_TEXBEML:
+                 ret = vsir_program_lower_texbem(program, &it, message_context);

@@ -1,0 +1,82 @@
+Subject: ntdll: msync PulseEvent yields only when it woke a thread
+Date: 2026-10-18
+Applies to: CrossOver 26.3.0 Wine sources, after 0014
+Files changed: dlls/ntdll/unix/msync.c
+
+PulseEvent sets the event, calls sched_yield() so that woken threads can see
+it, and resets it. On macOS sched_yield() can cost the caller its time slice.
+BO1's main thread pulses events, and a sample of a match had 16% of that
+thread inside this sched_yield(). The yield only helps when a thread was
+waiting: signal_all() now reports whether __ulock_wake() woke a thread or
+wineserver was told about waiters, and PulseEvent yields only then.
+
+Review fixes (2026-10-24): a pulse on an event that is already signalled
+yields too. A SetEvent just before may have woken threads that have not
+looked at the event yet; without the yield the pulse reset it under them.
+With four waiters, SetEvent then PulseEvent released all of them in 2-7 of
+200 rounds without this yield, 67 with it (stock CrossOver: 78-90; msync's
+pulse races in stock too, Windows releases all of them).
+Test: tests/src/pulse-test.c.
+License: LGPL-2.1-or-later, like the Wine files it modifies.
+---
+diff --git a/dlls/ntdll/unix/msync.c b/dlls/ntdll/unix/msync.c
+index ae46bf3..a88643a 100644
+--- a/dlls/ntdll/unix/msync.c
++++ b/dlls/ntdll/unix/msync.c
+@@ -646,15 +646,18 @@ void msync_init(void)
+     }
+ }
+ 
+-static inline void signal_all( void *shm, unsigned int shm_idx )
++/* Returns whether a thread may have been woken. */
++static inline BOOL signal_all( void *shm, unsigned int shm_idx )
+ {
+     __thread static mach_msg_header_t send_header;
+     struct event *event_obj = (struct event *)shm;
++    BOOL woke;
+ 
+-    __ulock_wake( UL_COMPARE_AND_WAIT_SHARED | ULF_WAKE_ALL, shm, 0 );
++    /* 0 when it woke a thread, -ENOENT when none was waiting. */
++    woke = !__ulock_wake( UL_COMPARE_AND_WAIT_SHARED | ULF_WAKE_ALL | ULF_NO_ERRNO, shm, 0 );
+ 
+     if (!__atomic_load_n( &event_obj->multiple_waiters, __ATOMIC_SEQ_CST ))
+-        return;
++        return woke;
+ 
+     send_header.msgh_bits = msgh_bits_send;
+     send_header.msgh_id = shm_idx;
+@@ -663,6 +666,7 @@ static inline void signal_all( void *shm, unsigned int shm_idx )
+ 
+     mach_msg2( &send_header, MACH_SEND_MSG, send_header.msgh_size, 0,
+                MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, 0 );
++    return TRUE;
+ }
+ 
+ NTSTATUS msync_release_semaphore_obj( int obj, ULONG count, ULONG *prev_count )
+@@ -722,17 +726,21 @@ NTSTATUS msync_reset_event_obj( int obj, LONG *prev_state )
+ NTSTATUS msync_pulse_event_obj( int obj, LONG *prev_state )
+ {
+     struct event *event = get_shm( obj );
++    BOOL woke = FALSE;
+     LONG current;
+ 
+     /* This isn't really correct; an application could miss the write.
+      * Unfortunately we can't really do much better. Fortunately this is rarely
+      * used (and publicly deprecated). */
+     if (!(current = __atomic_exchange_n( &event->signaled, 1, __ATOMIC_SEQ_CST )))
+-        signal_all( (void *)event, obj );
+-
+-    /* Try to give other threads a chance to wake up. Hopefully erring on this
+-     * side is the better thing to do... */
+-    sched_yield();
++        woke = signal_all( (void *)event, obj );
++
++    /* Try to give woken threads a chance to see the event before it is reset.
++     * Only when there may be some: sched_yield() can cost the caller its time
++     * slice on macOS, and BO1 pulses events from its main thread. That is when
++     * this pulse woke a thread, or when the event was already signalled: then
++     * a SetEvent just before may have woken threads that have not looked yet. */
++    if (woke || current) sched_yield();
+ 
+     __atomic_store_n( &event->signaled, 0, __ATOMIC_SEQ_CST );
+ 

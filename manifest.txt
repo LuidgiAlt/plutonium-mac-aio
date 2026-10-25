@@ -1,0 +1,9 @@
+# Every file setup.sh or build/build.sh downloads: name, URL, SHA-256.
+# "-" means the file is not pinned: plutonium.exe (Plutonium updates it;
+# setup.sh checks its signature).
+crossover-sources-26.3.0.tar.gz https://media.codeweavers.com/pub/crossover/source/crossover-sources-26.3.0.tar.gz ac99c8ca4b3848f3e81784135f023df266b61c2345726ea55a50b3e030dd6872
+dxmt-v0.80-builtin.tar.gz https://github.com/3Shain/dxmt/releases/download/v0.80/dxmt-v0.80-builtin.tar.gz 8f260e36b5739e68f3bad613381441385c4dc7b85b78ba8de653d5a6a264529d
+MoltenVK-macos.tar https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-macos.tar f95765a6229cb7b915990a2890ce12ebe36a730b021545d3d52ae69ce4c4024e
+plutonium.exe https://cdn.plutonium.pw/updater/plutonium.exe -
+# Prebuilt patched binaries (build/build.sh --release 0.1.0).
+plutonium-mac-aio-bin.tar.gz https://github.com/LuidgiAlt/plutonium-mac-aio/releases/download/v0.1.0/plutonium-mac-aio-bin-0.1.0.tar.gz 8f9b06214c27872fb2039ca4ba5871306bbe657ceeba90e96616775e2a9ee085

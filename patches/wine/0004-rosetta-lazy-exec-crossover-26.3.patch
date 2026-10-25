@@ -1,0 +1,144 @@
+Subject: ntdll: under Rosetta, add PROT_EXEC lazily instead of forcing it when DEP is off
+Date: 2026-10-11
+Applies to: CrossOver 26.3.0 Wine sources (crossover-sources-26.3.0.tar.gz), after 0003
+Files changed: dlls/ntdll/unix/virtual.c
+Enabled by: WINE_ROSETTA_LAZY_EXEC=1
+
+Plutonium's bootstrapper has no NX_COMPAT flag, so Wine turns off data
+execution prevention for it and then maps all readable memory
+writable+executable. Under Rosetta the first write to such a page traps, and
+CrossOver fixes it up ("CW Hack 24945") under the process-wide virtual_mutex.
+On the GPU-shared memory that wined3d uploads through, each fix-up waited up
+to seconds (about 13 million faults in 6 minutes of BO2). With the variable
+set, a page gets PROT_EXEC on the first instruction fetch from it, a later
+write drops it again, and data pages stay read/write and never trap.
+
+Review fixes (2026-10-24):
+- Turning lazy exec off at run time (the process enables DEP) now restores
+  every view's real protections, as switching force_exec_prot does. Before,
+  pages made executable on demand stayed executable and Wine no longer knew:
+  code on a PAGE_READWRITE page still ran with DEP on.
+- The lazy-exec branches report success without raising. If the same
+  address faults three times in a row on a thread, the fault goes to the
+  normal path, which raises it, instead of looping at full CPU.
+Test: tests/src/lazy-exec-test.c (exec, selfwrite, dep-on, readonly).
+License: LGPL-2.1-or-later, like the Wine file it modifies.
+---
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 4f8b03d..3cdf6b4 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -240,6 +240,25 @@ static const size_t view_block_size = 0x100000;
+ static void *preload_reserve_start;
+ static void *preload_reserve_end;
+ static BOOL force_exec_prot;  /* whether to force PROT_EXEC on all PROT_READ mmaps */
++#ifdef __APPLE__
++/* WINE_ROSETTA_LAZY_EXEC=1: when data execution prevention is turned off,
++ * add PROT_EXEC page by page on the first instruction fetch instead of
++ * mapping all readable memory executable. Under Rosetta every first write to
++ * a writable+executable page traps (see CW Hack 24945 below) and the fix-up
++ * runs under virtual_mutex, which stalled the whole process for seconds on
++ * GPU-shared upload memory. */
++static BOOL lazy_exec;
++static int lazy_exec_enabled(void)
++{
++    static int enabled = -1;
++    if (enabled == -1)
++    {
++        const char *env = getenv( "WINE_ROSETTA_LAZY_EXEC" );
++        enabled = env && atoi( env );
++    }
++    return enabled;
++}
++#endif
+ static BOOL enable_write_exceptions;  /* raise exception on writes to executable memory */
+ 
+ struct range_entry
+@@ -4549,11 +4568,45 @@ NTSTATUS virtual_handle_fault( EXCEPTION_RECORD *rec, void *stack )
+     void *addr = (void *)rec->ExceptionInformation[1];
+     char *page = ROUND_ADDR( addr, host_page_mask );
+     BYTE vprot;
++#ifdef __APPLE__
++    BOOL lazy_ok;
++#endif
+ 
+     mutex_lock( &virtual_mutex );  /* no need for signal masking inside signal handler */
+     vprot = get_host_page_vprot( page );
+ 
+ #ifdef __APPLE__
++    /* The lazy-exec branches report success without raising. A fault they
++     * keep "fixing" (the same address three times in a row on this thread)
++     * goes to the normal path instead, which raises it. */
++    {
++        static __thread void *last_addr;
++        static __thread int repeats;
++
++        if (addr == last_addr) repeats++;
++        else { last_addr = addr; repeats = 1; }
++        lazy_ok = lazy_exec && repeats < 3;
++    }
++
++    if (lazy_ok && (get_unix_prot( vprot ) & PROT_READ) && !(get_unix_prot( vprot ) & PROT_EXEC))
++    {
++        /* Instruction fetch from a readable page with execution allowed for
++         * the process: make this host page executable and retry. Rosetta may
++         * report the fetch as a read fault, so also accept a read fault at
++         * the instruction pointer. */
++        ULONG_PTR pc = (ULONG_PTR)rec->ExceptionAddress;
++        if (err == EXCEPTION_EXECUTE_FAULT ||
++            (err == EXCEPTION_READ_FAULT && (ULONG_PTR)addr - pc < 16))
++        {
++            /* Same host-page granularity as mprotect_range(). */
++            if (!mprotect( page, host_page_size, get_unix_prot( vprot ) | PROT_EXEC ))
++            {
++                ret = STATUS_SUCCESS;
++                goto done;
++            }
++        }
++    }
++
+     /* Rosetta on Apple Silicon misreports certain write faults as read faults. */
+     if (err == EXCEPTION_READ_FAULT && (get_unix_prot( vprot ) & PROT_READ))
+     {
+@@ -4561,6 +4614,19 @@ NTSTATUS virtual_handle_fault( EXCEPTION_RECORD *rec, void *stack )
+         err = EXCEPTION_WRITE_FAULT;
+     }
+ 
++    /* A write to a page we made executable on demand: drop PROT_EXEC again,
++     * restoring the protection the page should have; the next instruction
++     * fetch from it will add it back. */
++    if (lazy_ok && err == EXCEPTION_WRITE_FAULT &&
++        (get_unix_prot( vprot ) & PROT_WRITE) && !(get_unix_prot( vprot ) & PROT_EXEC))
++    {
++        if (!mprotect_range( page, host_page_size, 0, 0 ))
++        {
++            ret = STATUS_SUCCESS;
++            goto done;
++        }
++    }
++
+     /* CW Hack 24945 */
+     if (err == EXCEPTION_WRITE_FAULT &&
+         ((get_unix_prot( vprot ) & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)))
+@@ -4964,9 +5030,20 @@ void virtual_set_force_exec( BOOL enable )
+ {
+     struct file_view *view;
+     sigset_t sigset;
++    BOOL restore = FALSE;
+ 
++#ifdef __APPLE__
++    if (lazy_exec_enabled())
++    {
++        /* Turning lazy exec off (DEP enabled): pages made executable on
++         * demand must get their real protection back. */
++        restore = lazy_exec && !enable;
++        lazy_exec = enable;
++        enable = FALSE;
++    }
++#endif
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+-    if (!force_exec_prot != !enable)  /* change all existing views */
++    if (!force_exec_prot != !enable || restore)  /* change all existing views */
+     {
+         force_exec_prot = enable;
+ 

@@ -1,0 +1,109 @@
+Subject: vkd3d-shader: read Direct3D 9 vPos and vFace in SPIR-V pixel shaders
+Date: 2026-10-13
+Applies to: CrossOver 26.3.0 Wine sources, after 0007
+Files changed: libs/vkd3d/libs/vkd3d-shader/d3dbc.c, libs/vkd3d/libs/vkd3d-shader/ir.c, libs/vkd3d/libs/vkd3d-shader/spirv.c, libs/vkd3d/libs/vkd3d-shader/vkd3d_shader_private.h
+
+Shader model 3 pixel shaders read the pixel position from vPos (MISCTYPE
+register 0). The SPIR-V backend did not handle MISCTYPE and failed with
+"Unrecognized register", so wined3d drew nothing with those shaders. vPos and
+vFace get their own input signature slots, MISCTYPE reads are mapped to them,
+and FragCoord.xy is floored for shader model 1-3, because Direct3D 9's vPos
+has no 0.5 pixel centre offset.
+
+Test: tests/src/d3d9-vpos-test.c
+Review fixes (2026-10-24): vFace was read as the integer -1/0 of shader
+model 4's front-face value, i.e. NaN for front faces and +0 for back faces;
+shader model 1-3 now gets the float +1/-1 Direct3D 9 defines.
+Test: tests/src/d3d9-vface-test.c.
+License: LGPL-2.1-or-later, like the Wine files it modifies.
+---
+diff --git a/libs/vkd3d/libs/vkd3d-shader/d3dbc.c b/libs/vkd3d/libs/vkd3d-shader/d3dbc.c
+index 87a7d48..a8402d4 100644
+--- a/libs/vkd3d/libs/vkd3d-shader/d3dbc.c
++++ b/libs/vkd3d/libs/vkd3d-shader/d3dbc.c
+@@ -831,11 +831,11 @@ static bool add_signature_element_from_register(struct vkd3d_shader_sm1_parser *
+             {
+                 case 0:
+                     return add_signature_element(sm1, false, "VPOS", 0,
+-                            VKD3D_SHADER_SV_POSITION, register_index, is_dcl, mask, dst_modifiers);
++                            VKD3D_SHADER_SV_POSITION, SM1_MISC_REGISTER_OFFSET + register_index, is_dcl, mask, dst_modifiers);
+ 
+                 case 1:
+                     return add_signature_element(sm1, false, "VFACE", 0,
+-                            VKD3D_SHADER_SV_IS_FRONT_FACE, register_index, is_dcl, 0x1, dst_modifiers);
++                            VKD3D_SHADER_SV_IS_FRONT_FACE, SM1_MISC_REGISTER_OFFSET + register_index, is_dcl, 0x1, dst_modifiers);
+ 
+                 default:
+                     vkd3d_shader_parser_error(&sm1->p, VKD3D_SHADER_ERROR_D3DBC_INVALID_REGISTER_INDEX,
+diff --git a/libs/vkd3d/libs/vkd3d-shader/ir.c b/libs/vkd3d/libs/vkd3d-shader/ir.c
+index 45c68f3..bef7afa 100644
+--- a/libs/vkd3d/libs/vkd3d-shader/ir.c
++++ b/libs/vkd3d/libs/vkd3d-shader/ir.c
+@@ -4153,6 +4153,15 @@ static void shader_src_param_io_normalise(struct vkd3d_shader_src_param *src_par
+             signature = normaliser->input_signature;
+             break;
+ 
++        /* vPos and vFace. */
++        case VKD3DSPR_MISCTYPE:
++            if (normaliser->shader_type != VKD3D_SHADER_TYPE_PIXEL)
++                return;
++            reg->type = VKD3DSPR_INPUT;
++            reg_idx = SM1_MISC_REGISTER_OFFSET + reg->idx[0].offset;
++            signature = normaliser->input_signature;
++            break;
++
+         default:
+             return;
+     }
+diff --git a/libs/vkd3d/libs/vkd3d-shader/spirv.c b/libs/vkd3d/libs/vkd3d-shader/spirv.c
+index 0d260d6..c4ddc8e 100644
+--- a/libs/vkd3d/libs/vkd3d-shader/spirv.c
++++ b/libs/vkd3d/libs/vkd3d-shader/spirv.c
+@@ -5205,6 +5205,12 @@ static uint32_t sv_instance_id_fixup(struct spirv_compiler *compiler,
+ static uint32_t sv_front_face_fixup(struct spirv_compiler *compiler,
+         uint32_t front_facing_id)
+ {
++    /* Shader model 1-3 vFace is a float: +1 for front faces, -1 for back
++     * faces. The integer form below would be read as NaN and +0. */
++    if (compiler->program->shader_version.major < 4)
++        return vkd3d_spirv_build_op_select(&compiler->spirv_builder, spirv_get_type_id(compiler, VSIR_DATA_F32, 1),
++                front_facing_id, spirv_compiler_get_constant_float(compiler, 1.0f),
++                spirv_compiler_get_constant_float(compiler, -1.0f));
+     return spirv_compiler_emit_bool_to_int(compiler, 1, front_facing_id, true);
+ }
+ 
+@@ -5218,8 +5224,21 @@ static uint32_t frag_coord_fixup(struct spirv_compiler *compiler, uint32_t frag_
+     w_id = vkd3d_spirv_build_op_composite_extract1(builder, type_id, frag_coord_id, 3);
+     w_id = vkd3d_spirv_build_op_fdiv(builder, type_id, spirv_compiler_get_constant_float(compiler, 1.0f), w_id);
+     type_id = spirv_get_type_id(compiler, VSIR_DATA_F32, VKD3D_VEC4_SIZE);
++    frag_coord_id = vkd3d_spirv_build_op_composite_insert1(builder, type_id, w_id, frag_coord_id, 3);
+ 
+-    return vkd3d_spirv_build_op_composite_insert1(builder, type_id, w_id, frag_coord_id, 3);
++    /* Direct3D 9's vPos holds the integer pixel position, without the 0.5
++     * pixel centre offset. */
++    if (compiler->program->shader_version.major < 4)
++    {
++        static const uint32_t components[] = {4, 5, 2, 3};
++        uint32_t floor_id = vkd3d_spirv_build_op_ext_inst(builder, type_id,
++                vkd3d_spirv_get_glsl_std450_instr_set(builder), GLSLstd450Floor, &frag_coord_id, 1);
++
++        frag_coord_id = vkd3d_spirv_build_op_vector_shuffle(builder, type_id,
++                frag_coord_id, floor_id, components, ARRAY_SIZE(components));
++    }
++
++    return frag_coord_id;
+ }
+ 
+ struct vkd3d_spirv_builtin
+diff --git a/libs/vkd3d/libs/vkd3d-shader/vkd3d_shader_private.h b/libs/vkd3d/libs/vkd3d-shader/vkd3d_shader_private.h
+index 97fe523..a8dffb7 100644
+--- a/libs/vkd3d/libs/vkd3d-shader/vkd3d_shader_private.h
++++ b/libs/vkd3d/libs/vkd3d-shader/vkd3d_shader_private.h
+@@ -1149,6 +1149,7 @@ enum vkd3d_shader_input_sysval_semantic
+ 
+ #define SM1_COLOR_REGISTER_OFFSET 8
+ #define SM1_RASTOUT_REGISTER_OFFSET 10
++#define SM1_MISC_REGISTER_OFFSET 12
+ 
+ #define SIGNATURE_TARGET_LOCATION_UNUSED (~0u)
+ 

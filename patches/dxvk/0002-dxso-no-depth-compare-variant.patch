@@ -1,0 +1,181 @@
+Subject: DXVK dxso: compare depth textures in the shader, one image per binding
+Date: 2026-10-24
+Applies to: sources/dxvk (DXVK 1.10.3 cxaddon), after 0001
+Files changed: src/dxso/dxso_compiler.cpp, src/d3d9/d3d9_device.cpp
+
+For each sampler, DXVK's Direct3D 9 shader compiler declares a colour image
+and a depth-compare ("shadow") image at the same binding and picks one with
+a spec constant. MoltenVK 1.4.2 cannot translate that: with Metal argument
+buffers SPIRV-Cross drops the shadow variant's sampler ("use of undeclared
+identifier 's0_2d_shadowSmplr'"), and without them Metal rejects two
+textures at one index ("cannot reserve 'texture' resource location"). In
+Black Ops the screen stayed black: 42 and then 172 pixel shaders failed.
+
+The depth-compare variant is no longer declared. When the spec constant
+marks a sampler as a depth texture, the shader samples the colour image and
+compares itself: 1.0 where the reference is <= the stored depth, else 0.0,
+in every component, with the reference divided like the coordinates for a
+projected sample (SM1's projected and unprojected samples are compared
+separately before the existing select). Samplers of depth textures no longer
+enable comparison. INTZ/DF16/DF24 reads are unchanged (they are not depth
+textures for DXVK).
+
+Review fixes (2026-10-24): the first version only dropped the variant, so
+shadow maps returned the depth value instead of a comparison on every
+driver, and a comparison sampler sampled a colour image (undefined in
+Vulkan). Black Ops had to be played with shadows off (sm_enable 0); with
+the comparison in the shader they can be turned on again.
+Limit: one comparison per sample (no 2x2 PCF filtering of the results).
+Test: tests/src/d3d9-shadow-test.c.
+License: zlib, like the DXVK files it modifies.
+---
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 2099a55..7c1b0fd 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -5987,8 +5987,10 @@ namespace dxvk {
+       info.addressModeU   = DecodeAddressMode(cKey.AddressU);
+       info.addressModeV   = DecodeAddressMode(cKey.AddressV);
+       info.addressModeW   = DecodeAddressMode(cKey.AddressW);
+-      info.compareToDepth = cKey.Depth;
+-      info.compareOp      = cKey.Depth ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_NEVER;
++      // Depth textures are compared in the shader (dxso, SampleType): one
++      // image per binding, which MoltenVK can translate.
++      info.compareToDepth = VK_FALSE;
++      info.compareOp      = VK_COMPARE_OP_NEVER;
+       info.magFilter      = DecodeFilter(cKey.MagFilter);
+       info.minFilter      = DecodeFilter(cKey.MinFilter);
+       info.mipmapMode     = mipFilter.MipFilter;
+diff --git a/src/dxso/dxso_compiler.cpp b/src/dxso/dxso_compiler.cpp
+index 7cd6f72..8174772 100644
+--- a/src/dxso/dxso_compiler.cpp
++++ b/src/dxso/dxso_compiler.cpp
+@@ -826,10 +826,9 @@ namespace dxvk {
+ 
+       DclSampler(idx, binding, samplerType, false, implicit);
+ 
+-      if (samplerType != SamplerTypeTexture3D) {
+-        // We could also be depth compared!
+-        DclSampler(idx, binding, samplerType, true, implicit);
+-      }
++      // A depth-compare variant at the same binding cannot be translated by
++      // MoltenVK (one texture slot per binding in Metal), so it is not
++      // declared: depth textures are sampled like colour ones.
+     }
+     else {
+       // Could be any of these!
+@@ -838,9 +837,6 @@ namespace dxvk {
+         auto samplerType = static_cast<DxsoSamplerType>(i);
+ 
+         DclSampler(idx, binding, samplerType, false, implicit);
+-
+-        if (samplerType != SamplerTypeTexture3D)
+-          DclSampler(idx, binding, samplerType, true, implicit);
+       }
+     }
+ 
+@@ -2890,7 +2886,9 @@ void DxsoCompiler::emitControlFlowGenericLoop(
+ 
+     DxsoSampler sampler = m_samplers.at(samplerIdx);
+ 
+-    auto SampleImage = [this, opcode, dst, ctx, samplerIdx, GetProjectionValue](DxsoRegisterValue texcoordVar, DxsoSamplerInfo& sampler, bool depth, DxsoSamplerType samplerType, uint32_t specConst) {
++    // compare: sample a depth texture through its colour image and do the
++    // depth comparison in the shader (see SampleType).
++    auto SampleImage = [this, opcode, dst, ctx, samplerIdx, GetProjectionValue](DxsoRegisterValue texcoordVar, DxsoSamplerInfo& sampler, bool depth, DxsoSamplerType samplerType, uint32_t specConst, bool compare) {
+       DxsoRegisterValue result;
+       result.type.ctype  = dst.type.ctype;
+       result.type.ccount = depth ? 1 : 4;
+@@ -2945,12 +2943,26 @@ void DxsoCompiler::emitControlFlowGenericLoop(
+ 
+       uint32_t reference = 0;
+ 
+-      if (depth) {
++      if (depth || compare) {
+         uint32_t component = sampler.dimensions;
+         reference = m_module.opCompositeExtract(
+           m_module.defFloatType(32), texcoordVar.id, 1, &component);
+       }
+ 
++      // Direct3D 9 shadow sampling: 1.0 where reference <= stored depth,
++      // else 0.0, in every component. A projected sample divides the
++      // reference like the coordinates.
++      auto CompareInShader = [&](uint32_t sampled, bool projected) {
++        uint32_t float_t = m_module.defFloatType(32);
++        uint32_t ref = projected ? m_module.opFDiv(float_t, reference, projDivider) : reference;
++        uint32_t x = 0;
++        uint32_t stored = m_module.opCompositeExtract(float_t, sampled, 1, &x);
++        uint32_t pass = m_module.opFOrdLessThanEqual(m_module.defBoolType(), ref, stored);
++        uint32_t value = m_module.opSelect(float_t, pass, m_module.constf32(1.0f), m_module.constf32(0.0f));
++        std::array<uint32_t, 4> components = { value, value, value, value };
++        return m_module.opCompositeConstruct(typeId, components.size(), components.data());
++      };
++
+       if (projDivider != 0) {
+         for (uint32_t i = sampler.dimensions; i < 4; i++) {
+           texcoordVar.id = m_module.opCompositeInsert(getVectorTypeId(texcoordVar.type),
+@@ -2977,10 +2989,13 @@ void DxsoCompiler::emitControlFlowGenericLoop(
+         typeId,
+         sampler,
+         texcoordVar,
+-        reference,
++        compare ? 0 : reference,
+         fetch4,
+         imageOperands);
+ 
++      if (compare)
++        result.id = CompareInShader(result.id, projDivider != 0);
++
+       if (switchProjResult) {
+         uint32_t bool_t = m_module.defBoolType();
+ 
+@@ -2989,10 +3004,13 @@ void DxsoCompiler::emitControlFlowGenericLoop(
+           typeId,
+           sampler,
+           texcoordVar,
+-          reference,
++          compare ? 0 : reference,
+           fetch4,
+           imageOperands);
+ 
++        if (compare)
++          nonProjResult = CompareInShader(nonProjResult, false);
++
+         uint32_t shouldProj = m_module.opBitFieldUExtract(
+           m_module.defIntType(32, 0), m_ps.projectionSpec,
+           m_module.consti32(samplerIdx), m_module.consti32(1));
+@@ -3054,7 +3072,7 @@ void DxsoCompiler::emitControlFlowGenericLoop(
+ 
+     auto SampleType = [&](DxsoSamplerType samplerType) {
+       // Only do the check for depth comp. samplers
+-      // if we aren't a 3D texture
++      // if we aren't a 3D texture.
+       if (samplerType != SamplerTypeTexture3D) {
+         uint32_t colorLabel  = m_module.allocateId();
+         uint32_t depthLabel  = m_module.allocateId();
+@@ -3070,18 +3088,23 @@ void DxsoCompiler::emitControlFlowGenericLoop(
+         m_module.opBranchConditional(isDepth, depthLabel, colorLabel);
+ 
+         m_module.opLabel(colorLabel);
+-        SampleImage(texcoordVar, sampler.color[samplerType], false, samplerType, sampler.boundConst);
++        SampleImage(texcoordVar, sampler.color[samplerType], false, samplerType, sampler.boundConst, false);
+         m_module.opBranch(endLabel);
+ 
+         m_module.opLabel(depthLabel);
+         // No spec constant as if we are unbound we always fall down the color path.
+-        SampleImage(texcoordVar, sampler.depth[samplerType], true, samplerType, 0);
++        // Without the depth-compare variant (see emitDclSampler), the colour
++        // image is sampled and compared in the shader.
++        if (sampler.depth[samplerType].varId)
++          SampleImage(texcoordVar, sampler.depth[samplerType], true, samplerType, 0, false);
++        else
++          SampleImage(texcoordVar, sampler.color[samplerType], false, samplerType, 0, true);
+         m_module.opBranch(endLabel);
+ 
+         m_module.opLabel(endLabel);
+       }
+       else
+-        SampleImage(texcoordVar, sampler.color[samplerType], false, samplerType, sampler.boundConst);
++        SampleImage(texcoordVar, sampler.color[samplerType], false, samplerType, sampler.boundConst, false);
+     };
+ 
+     if (m_programInfo.majorVersion() >= 2 && !m_moduleInfo.options.forceSamplerTypeSpecConstants) {
