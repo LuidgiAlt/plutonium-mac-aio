@@ -46,9 +46,21 @@ bo1_prepare() {
   return 0
 }
 
-# bo2_prepare <plutonium_dir>: BO2 (T6).
+# bo2_prepare <plutonium_dir>: BO2 (T6). BO2's MSAA comes from its binary
+# hardware profile, which overrides the text config. With none in storage it
+# falls back to the one in the game's players folder, which another renderer
+# may have written with 8x (Apple GPUs stop at 4x: the game crashes). An
+# invalid profile (zeros) in storage makes BO2 detect its own instead, which
+# picks no MSAA under DXMT, and replace it.
 bo2_prepare() {
-  local cfg
+  local cfg mode chp
+  if [ -d "$1/storage/t6" ]; then
+    mkdir -p "$1/storage/t6/players"
+    for mode in mp zm; do
+      chp=$1/storage/t6/players/hardware_$mode.chp
+      [ -f "$chp" ] || head -c 4096 /dev/zero > "$chp"
+    done
+  fi
   for cfg in "$1"/storage/t6/players/plutonium_mp.cfg "$1"/storage/t6/players/plutonium_zm.cfg; do
     [ -f "$cfg" ] || continue
     clamp_msaa "$cfg"

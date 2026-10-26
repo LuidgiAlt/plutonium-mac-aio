@@ -44,7 +44,7 @@ The Plutonium launcher opens; pick BO1 or BO2 there. Run it from Terminal.
 |---|---|
 | `HUD=1` | Apple's Metal performance HUD (frame rate) |
 | `MAXFPS=<n>` | Cap BO2's frame rate, e.g. `MAXFPS=60` |
-| `WINDOWED=1` / `FULLSCREEN=1` | Display mode for both games |
+| `WINDOWED=1` / `FULLSCREEN=1` | Display mode for both games (BO2: its own options win) |
 | `TWEAKS=0` | Keep BO1's blur, distortion and frame cap (turned off by default for speed) |
 | `D3D9=vulkan` | BO1 on wined3d's Vulkan renderer instead of DXVK |
 | `XAUDIO=builtin` | Wine's XAudio2 instead of Microsoft's (BO1 gunfire is then silent) |
@@ -70,16 +70,18 @@ Example: `HUD=1 MAXFPS=120 ./launch.sh`
 | "Plutonium is running" | A launch is still running; *Quit and restart* stops it. |
 | "Plutonium stopped right away" | Read the log shown; try `VERBOSE=1 ./launch.sh`. |
 | Hangs at "Loading fastfile" | `NTDLL=legacy ./launch.sh` |
-| BO2 crashes or stays black on start | BO2 asked for 8x MSAA (see below). |
+| BO2 crashes on start | Usually a BO2 profile asking for 8x MSAA (see Known issues). |
 | Black textures for a moment on a new map | Shaders are compiled the first time; it gets better as you play. |
 
 ## Known issues
 
-- **BO2 and 8x MSAA:** BO2 takes its anti-aliasing from
-  `players/hardware_mp.chp` / `hardware_zm.chp`. A fresh one can ask for 8x,
-  which Apple GPUs cannot do. Copy working `.chp` files into
-  `prefix/drive_c/users/crossover/AppData/Local/Plutonium/storage/t6/players/`.
-  Each launch also caps `r_aaSamples` at 4 in the text configs.
+- **BO2 and 8x MSAA:** BO2 takes its anti-aliasing and fullscreen setting
+  from a binary profile (`players/hardware_mp.chp` / `hardware_zm.chp`). One
+  written by another renderer (e.g. Steam in a CrossOver bottle) can ask for
+  8x, which Apple GPUs cannot do, and the game crashes ("Oops! The game ran
+  into a problem", `E_INVALIDARG`). `./launch.sh` makes BO2 create its own
+  safe profile in Plutonium's folder the first time, so a fresh install
+  starts windowed without MSAA: switch to fullscreen in BO2's options.
 - **BO1 shadows** are kept off in new configs (`sm_enable "0"`).
 - **Plutonium's installer** cannot be pinned by hash (Plutonium updates it);
   setup checks that it is a signed Windows program.
