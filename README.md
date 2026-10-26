@@ -61,6 +61,18 @@ Example: `HUD=1 MAXFPS=120 ./launch.sh`
 | `./launch.sh log` | Open the last run's log |
 | `./launch.sh selftest` | Check the installation without a game |
 
+## Updating
+
+```bash
+git pull
+./setup.sh
+```
+
+`git pull` brings script fixes, which the next `./launch.sh` uses. `./setup.sh`
+then installs only what changed in `manifest.txt` (new patched binaries, DXMT
+or MoltenVK) and skips the rest: your prefix, Plutonium login and game
+settings stay. No uninstall needed.
+
 ## Troubleshooting
 
 | Problem | What to do |

@@ -96,18 +96,22 @@ step_binaries() {
   done_mark "$mark" "$source"
 }
 
+# The mark holds the archives' checksums, so a new DXMT or MoltenVK in
+# manifest.txt is installed by the next setup run.
 step_thirdparty() {
-  local mark=$root/runner/.thirdparty name url sha
-  if [ -f "$mark" ]; then skip thirdparty; return; fi
+  local mark=$root/runner/.thirdparty names=(dxmt-v0.80-builtin.tar.gz MoltenVK-macos.tar) urls=() shas=() i
+  for i in 0 1; do
+    read -r "urls[$i]" "shas[$i]" < <(manifest_get "${names[$i]}") || die "manifest.txt has no ${names[$i]}"
+  done
+  if [ -f "$mark" ] && [ "$(cat "$mark")" = "${shas[*]}" ]; then skip thirdparty; return; fi
   mkdir -p "$downloads"
-  for name in dxmt-v0.80-builtin.tar.gz MoltenVK-macos.tar; do
-    read -r url sha < <(manifest_get "$name") || die "manifest.txt has no $name"
-    log_info "downloading $name"
-    fetch "$url" "$downloads/$name" "$sha" || die "download of $name failed: $url"
+  for i in 0 1; do
+    log_info "downloading ${names[$i]}"
+    fetch "${urls[$i]}" "$downloads/${names[$i]}" "${shas[$i]}" || die "download of ${names[$i]} failed: ${urls[$i]}"
   done
   runner_thirdparty "$root" "$downloads" || die "could not install DXMT and MoltenVK"
   runner_select_d3d9 "$root" dxvk && runner_select_ntdll "$root" fixed || die "could not select DXVK and the patched ntdll"
-  done_mark "$mark"
+  done_mark "$mark" "${shas[*]}"
 }
 
 step_prefix() {

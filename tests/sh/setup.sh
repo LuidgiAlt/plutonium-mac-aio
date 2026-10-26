@@ -67,6 +67,22 @@ assert_contains "$out" "Z:${lib_two//\//\\}\\steamapps\\common\\Call of Duty Bla
 out=$("$r/setup.sh" < /dev/null 2>&1) || fail "second run failed: $(echo "$out" | tail -5)"
 for step in runner binaries thirdparty prefix; do assert_contains "$out" "skip $step"; done
 
+# DXMT and MoltenVK are recorded by their checksums: an install recorded the
+# old way ("done") or a new archive in manifest.txt installs them again.
+assert_eq "$(cat "$r/runner/.thirdparty")" "$(s "$dl/dxmt.tar.gz") $(s "$dl/mvk.tar")"
+echo "done" > "$r/runner/.thirdparty"
+out=$("$r/setup.sh" < /dev/null 2>&1) || fail "run after an old mark failed: $(echo "$out" | tail -3)"
+case "$out" in *"skip thirdparty"*) fail "an old thirdparty mark was trusted" ;; esac
+assert_eq "$(cat "$r/runner/.thirdparty")" "$(s "$dl/dxmt.tar.gz") $(s "$dl/mvk.tar")"
+echo "newer MoltenVK" > "$dl/mvk/MoltenVK/README"
+tar -cf "$dl/mvk2.tar" -C "$dl/mvk" MoltenVK
+sed -i '' "s|^MoltenVK-macos.tar .*|MoltenVK-macos.tar $(u "$dl/mvk2.tar") $(s "$dl/mvk2.tar")|" "$tmp/manifest.txt"
+out=$("$r/setup.sh" < /dev/null 2>&1) || fail "run with a new MoltenVK failed: $(echo "$out" | tail -3)"
+case "$out" in *"skip thirdparty"*) fail "a new MoltenVK in manifest.txt was skipped" ;; esac
+assert_contains "$out" "skip binaries"
+assert_eq "$(cat "$r/runner/.thirdparty")" "$(s "$dl/dxmt.tar.gz") $(s "$dl/mvk2.tar")"
+assert_file "$rc/lib64/libMoltenVK.dylib.142"
+
 # A runner made from another CrossOver build: setup asks before rebuilding.
 echo 26.3.0.00001 > "$r/runner/.version"
 if out=$(echo n | "$r/setup.sh" 2>&1); then fail "rebuild refused but setup succeeded"; fi
