@@ -26,6 +26,7 @@ assert_eq "$(cat "$t6")" "$t6_before" "bo1_prepare touched BO2's config"
 assert_file "$t5sp"
 assert_contains "$(cat "$t5sp")" 'seta com_first_time_pc "0"'
 assert_contains "$(cat "$t5sp")" 'seta sm_enable "0"'
+assert_contains "$(cat "$t5sp")" 'seta com_recommendedSet "1"'
 assert_contains "$(cat "$t5sp")" 'seta r_aaSamples "2"'
 assert_contains "$(cat "$t5sp")" 'seta r_blur_allowed "0"'
 case "$(cat "$t5")" in *com_first_time_pc*) fail "bo1_prepare replaced an existing config" ;; esac

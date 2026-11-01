@@ -14,13 +14,14 @@ display_mode() {
 }
 
 # bo1_seed <cfg> <msaa>: a first config for a BO1 mode that has none. The
-# game's first-run detection turns on shadows (BO1 froze with them) and 4x
+# game's first-run detection and its recommended settings (applied while
+# com_recommendedSet is not 1) turn on shadows (BO1 froze with them) and 4x
 # MSAA; these are the values of the setup that played well. The game writes
 # the rest of the file when it exits.
 bo1_seed() {
   [ -f "$1" ] && return 0
   mkdir -p "$(dirname "$1")"
-  printf 'seta %s "%s"\n' com_first_time_pc 0 sm_enable 0 r_aaSamples "$2" \
+  printf 'seta %s "%s"\n' com_first_time_pc 0 com_recommendedSet 1 sm_enable 0 r_aaSamples "$2" \
     r_blur_allowed 0 r_distortion 0 com_maxfps 0 > "$1"
 }
 

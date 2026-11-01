@@ -1,18 +1,21 @@
 # plutonium-mac-aio
 
+Play [Plutonium](https://plutonium.pw) Call of Duty: Black Ops (T5) and
+Black Ops II (T6) on an Apple Silicon Mac, with free and open-source software
+only.
+
+Setup downloads a patched Wine engine (built from source by this project),
+puts it in [Sikarugir](https://github.com/Sikarugir-App/Sikarugir)'s wrapper
+template, and installs a Wine prefix and a fresh Plutonium, all inside this
+folder. No CrossOver needed.
+Nothing else on the Mac is changed: not Steam, not your games.
+
+Tested on an M1 Pro.
+
 ## WARNING
 This repository is the only one OFFICIAL way to play BO1 (multiplayer and zombies) and BO2 (multiplayer, zombies and campaign) on Apple Silicon using Plutonium (Online and Offline).
 THERE WILL NEVER BE A PUBLIC WEBSITE ! The real source is this repo !
 BE CAREFUL !
-
-Play [Plutonium](https://plutonium.pw) Call of Duty: Black Ops (T5) and
-Black Ops II (T6) on an Apple Silicon Mac.
-
-One setup command installs a patched Wine, a Wine prefix and a fresh
-Plutonium, all inside this folder. Nothing else on the Mac is changed: not
-Steam, not your games.
-
-Tested on an M1 Pro.
 
 ## Requirements
 
@@ -27,8 +30,11 @@ cd plutonium-mac-aio
 ./setup.sh
 ```
 
-1. When Plutonium's installer window opens, log in, then close it.
-2. Setup prints two `Z:\...` paths. The first time the Plutonium launcher asks
+1. Setup downloads the engine from this repository's Releases, Sikarugir's
+   template, DXMT and Plutonium's installer (each checked by SHA-256 in
+   `manifest.txt`, except Plutonium's).
+2. When Plutonium's installer window opens, log in, then close it.
+3. Setup prints two `Z:\...` paths. The first time the Plutonium launcher asks
    where a game is, paste the matching path.
 
 Running `./setup.sh` again resumes or repairs a setup. `./setup.sh uninstall`
@@ -70,8 +76,8 @@ git pull
 ```
 
 `git pull` brings script fixes, which the next `./launch.sh` uses. `./setup.sh`
-then installs only what changed in `manifest.txt` (a new DXMT) and skips the
-rest: your prefix, Plutonium login and game
+then installs only what changed in `manifest.txt` (a new engine, Sikarugir's
+template or DXMT) and skips the rest: your prefix, Plutonium login and game
 settings stay. No uninstall needed.
 
 ## Troubleshooting
@@ -79,11 +85,12 @@ settings stay. No uninstall needed.
 | Problem | What to do |
 |---|---|
 | "Run ./setup.sh first" | Setup has not finished: run it. |
+| "build failed" (`BUILD=1`) | Read the log it names; check the tools in Building from source. |
 | "Plutonium is running" | A launch is still running; *Quit and restart* stops it. |
 | "Plutonium stopped right away" | Read the log shown; try `VERBOSE=1 ./launch.sh`. |
 | Hangs at "Loading fastfile" | `NTDLL=legacy ./launch.sh` |
 | BO2 crashes on start | Usually a BO2 profile asking for 8x MSAA (see Known issues). |
-| Black textures for a moment on a new map | Shaders are compiled the first time; it gets better as you play. |
+| Stutter in the first half-minute | Shaders are compiled and cached; wait in the menu, it gets better as you play. |
 
 ## Known issues
 
@@ -98,6 +105,24 @@ settings stay. No uninstall needed.
 - **Plutonium's installer** cannot be pinned by hash (Plutonium updates it);
   setup checks that it is a signed Windows program.
 
+## How it works
+
+`build/build.sh` builds the whole Wine from CodeWeavers' published CrossOver
+26.3 source with the patches below, as a Sikarugir engine
+(`build/out/wswine.bundle`): MoltenVK 1.4.2, DXVK's `d3d9.dll` and a second,
+older breakpoint ntdll (`NTDLL=legacy`) are inside. Its 32-bit Windows code
+uses SSE maths: the x87 code mingw makes by default is slow under Rosetta.
+The engine links against the x86_64 libraries of Sikarugir's wrapper
+template (FreeType, gnutls, SDL2), pinned in `manifest.txt`.
+
+Setup copies the template to `runner/Sikarugir.app` with the engine in its
+`Contents/Frameworks`, where the engine finds those libraries, and
+`runner/engine` links to it. BO2 renders through
+[DXMT](https://github.com/3Shain/dxmt), BO1 through DXVK on
+[MoltenVK](https://github.com/KhronosGroup/MoltenVK). Sikarugir's own engines
+do not have the Rosetta breakpoint patches, so Plutonium does not run on
+them.
+
 ## What is patched
 
 | Patch | Fixes |
@@ -110,19 +135,23 @@ settings stay. No uninstall needed.
 | dxvk 0001–0003 | DXVK 1.10.3 on MoltenVK 1.4.2 for BO1 |
 
 Each patch in `patches/` starts with a header explaining what it changes and
-why. BO2 renders through [DXMT](https://github.com/3Shain/dxmt), BO1 through
-DXVK on [MoltenVK](https://github.com/KhronosGroup/MoltenVK).
+why.
 
 ## Building from source
 
+The release's engine is built by `build/build.sh` (about an hour the first
+time). To build and use your own instead:
+
 ```bash
 xcode-select --install
-brew install mingw-w64 bison flex meson ninja glslang
-build/build.sh
+brew install mingw-w64 bison flex meson ninja glslang sdl2
+BUILD=1 ./setup.sh
 ```
 
 `build/build.sh --check` checks that every patch applies, `tests/sh/run.sh`
-runs the shell tests, and `tests/run.sh` the Wine tests.
+runs the shell tests, and `tests/run.sh` the Wine tests in the runner (also
+`./launch.sh selftest`). `build/build.sh --pack <version>` packs the engine
+and the test programs for a release and prints its `manifest.txt` line.
 
 ## Controller support
 - DualSense (Sony pads through SDL as XInput gamepads (the games read XInput only).
@@ -131,11 +160,14 @@ runs the shell tests, and `tests/run.sh` the Wine tests.
 ## Licenses
 
 - Scripts and test programs: MIT (`LICENSE`).
-- Wine patches and the binaries built from them: LGPL-2.1-or-later, built from
+- Wine patches and the engine built from them: LGPL-2.1-or-later, built from
   CodeWeavers' published source `crossover-sources-26.3.0.tar.gz`
   (https://media.codeweavers.com/pub/crossover/source/).
 - DXVK patches and DXVK's `d3d9.dll`: zlib, from the same source archive.
-- DXMT, MoltenVK and Plutonium are downloaded from their own releases.
+- MoltenVK 1.4.2 inside the engine: Apache-2.0, from Khronos' release.
+- Sikarugir's wrapper template, DXMT and Plutonium are downloaded by setup
+  from their own releases; they are not part of this repository or its
+  release.
 
 Patches 0001/0002 started from
 [wine-rosetta-fix](https://github.com/masonmcbride/wine-rosetta-fix).

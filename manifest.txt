@@ -5,3 +5,7 @@ crossover-sources-26.3.0.tar.gz https://media.codeweavers.com/pub/crossover/sour
 dxmt-v0.80-builtin.tar.gz https://github.com/3Shain/dxmt/releases/download/v0.80/dxmt-v0.80-builtin.tar.gz 8f260e36b5739e68f3bad613381441385c4dc7b85b78ba8de653d5a6a264529d
 MoltenVK-macos.tar https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-macos.tar f95765a6229cb7b915990a2890ce12ebe36a730b021545d3d52ae69ce4c4024e
 plutonium.exe https://cdn.plutonium.pw/updater/plutonium.exe -
+# Sikarugir's wrapper template: the runner, and the x86_64 libraries the engine links against.
+Sikarugir-Template.tar.xz https://github.com/Sikarugir-App/Template/releases/download/v1.0/Template-1.0.24.tar.xz 4b5f89eeb9ef139936bdfad33d9b420b05ea4597cb7d63376674f7a8e171321c
+# The engine and test programs of this release (build/build.sh --pack 0.2.0).
+plutonium-mac-aio-engine.tar.xz https://github.com/LuidgiAlt/plutonium-mac-aio/releases/download/v0.2.0/plutonium-mac-aio-engine-0.2.0.tar.xz dbccced60a71743d76c4b33d3916bc22132806be9aa3790ce93d963a26a7b056

@@ -1,7 +1,31 @@
-# The runner: the Wine of runner/engine with the files installed into it.
+# The runner: runner/Sikarugir.app, Sikarugir's wrapper template with the
+# engine of build/build.sh in Contents/Frameworks (where it finds the
+# template's libraries), and runner/engine, a link to that engine.
 # Every file that gets replaced is kept once as <file>.orig.
-# Needs lib/env.sh (put) and, for runner_thirdparty, lib/fetch.sh.
+# Needs lib/env.sh (put) and lib/fetch.sh.
 # shellcheck shell=bash
+
+# engine_stamp <engine>: what runner/.version holds: the engine's ntdll and
+# its version file (which names the build time).
+engine_stamp() {
+  echo "engine $(sha256_of "$1/lib/wine/x86_64-unix/ntdll.so.fixed") $(cat "$1/version" 2>/dev/null | sha256_of /dev/stdin)"
+}
+
+# runner_create <root> <template archive> <engine>
+runner_create() {
+  local r=$1/runner tmp
+  [ -f "$3/lib/wine/x86_64-unix/ntdll.so.fixed" ] || { echo "no engine at $3" >&2; return 1; }
+  mkdir -p "$r"
+  # A new runner has none of the installed files: drop the mark that says so.
+  rm -rf "$r/engine" "$r/Sikarugir.app" "$r/.thirdparty"
+  tmp=$(mktemp -d "$r/.template.XXXXXX") || return 1
+  if ! tar -xJf "$2" -C "$tmp" || ! mv "$tmp"/*.app "$r/Sikarugir.app"; then rm -rf "$tmp"; return 1; fi
+  rm -rf "$tmp"
+  cp -c -R "$3" "$r/Sikarugir.app/Contents/Frameworks/wswine.bundle" 2>/dev/null ||
+    cp -R "$3" "$r/Sikarugir.app/Contents/Frameworks/wswine.bundle" || return 1
+  ln -s Sikarugir.app/Contents/Frameworks/wswine.bundle "$r/engine" || return 1
+  engine_stamp "$3" > "$r/.version"
+}
 
 # Pinned DXMT archive; AIO_DXMT_SHA is for tests.
 dxmt_sha=${AIO_DXMT_SHA:-8f260e36b5739e68f3bad613381441385c4dc7b85b78ba8de653d5a6a264529d}

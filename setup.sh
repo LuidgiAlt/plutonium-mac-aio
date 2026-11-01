@@ -1,9 +1,12 @@
 #!/bin/bash
 # One-time setup of Plutonium BO1/BO2 for this Mac. Safe to run again:
 # finished steps are skipped. See README.md.
-#   ./setup.sh             runner, prefix, a fresh Plutonium
+#   ./setup.sh             engine, runner, prefix, a fresh Plutonium
 #   ./setup.sh uninstall   remove what setup made (asks first)
 # Options (environment variables):
+#   BUILD=1            build the engine from source (build/build.sh) instead of
+#                      downloading the release's
+#   AIO_ENGINE=...     an engine built elsewhere (default build/out/wswine.bundle)
 #   BO1_DIR=... BO2_DIR=...  game folders, if Steam's libraries do not have them
 set -euo pipefail
 root=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -48,6 +51,55 @@ step_preflight() {
   arch -x86_64 /usr/bin/true 2>/dev/null || die "Rosetta is not installed: softwareupdate --install-rosetta"
   steam_game_dir bo1 > /dev/null || log_info "warning: BO1 not found in Steam's libraries (set BO1_DIR); its native XAudio2 will be missing"
   steam_game_dir bo2 > /dev/null || log_info "warning: BO2 not found in Steam's libraries (set BO2_DIR)"
+}
+
+# engine_download <url> <sha>: the release's engine archive, extracted once
+# into downloads/engine (its test programs into tests/bin); prints the
+# engine's path.
+engine_download() {
+  local dir=$downloads/engine
+  if [ "$(cat "$dir/.sha" 2>/dev/null)" != "$2" ]; then
+    mkdir -p "$downloads"
+    log_info "downloading the engine" >&2
+    fetch "$1" "$downloads/plutonium-mac-aio-engine.tar.xz" "$2" || die "download of the engine failed: $1"
+    rm -rf "$dir" && mkdir -p "$dir"
+    tar -xJf "$downloads/plutonium-mac-aio-engine.tar.xz" -C "$dir" || die "the engine archive is damaged"
+    if [ -d "$dir/tests/bin" ]; then
+      rm -rf "$root/tests/bin" && mkdir -p "$root/tests" && cp -R "$dir/tests/bin" "$root/tests/bin"
+    fi
+    echo "$2" > "$dir/.sha"
+  fi
+  echo "$dir/wswine.bundle"
+}
+
+# The engine: AIO_ENGINE or a local build (build/out), else the release's
+# (pinned in manifest.txt), or one built now with BUILD=1. A different
+# engine replaces the runner's, keeping the prefix.
+step_runner() {
+  local engine=${AIO_ENGINE:-$root/build/out/wswine.bundle} url sha
+  if [ "${BUILD:-0}" = 1 ]; then
+    log_info "engine: building Wine from source (about an hour the first time; build/build.sh)"
+    "$root/build/build.sh" || die "build failed (see the log it names)"
+    engine=$root/build/out/wswine.bundle
+  elif [ ! -f "$engine/lib/wine/x86_64-unix/ntdll.so.fixed" ]; then
+    if read -r url sha < <(manifest_get plutonium-mac-aio-engine.tar.xz); then
+      engine=$(engine_download "$url" "$sha")
+    elif [ -d "$runner" ]; then
+      skip runner; return
+    else
+      die "manifest.txt names no prebuilt engine: build one with BUILD=1 ./setup.sh"
+    fi
+  fi
+  [ -f "$engine/lib/wine/x86_64-unix/ntdll.so.fixed" ] || die "no engine at $engine"
+  if [ -d "$runner" ] && [ "$(cat "$root/runner/.version" 2>/dev/null)" = "$(engine_stamp "$engine")" ]; then
+    skip runner; return
+  fi
+  read -r url sha < <(manifest_get Sikarugir-Template.tar.xz) || die "manifest.txt has no Sikarugir-Template.tar.xz"
+  mkdir -p "$downloads"
+  log_info "downloading Sikarugir's wrapper template"
+  fetch "$url" "$downloads/Sikarugir-Template.tar.xz" "$sha" || die "download of Sikarugir's template failed: $url"
+  log_info "runner: Sikarugir's wrapper template with the engine"
+  runner_create "$root" "$downloads/Sikarugir-Template.tar.xz" "$engine" || die "could not make the runner"
 }
 
 # The mark holds the archive's checksum, so a new DXMT in manifest.txt is
@@ -146,6 +198,7 @@ esac
 mkdir -p "$root/logs"
 export AIO_LOG=$root/logs/setup.log
 step_preflight
+step_runner
 step_thirdparty
 step_prefix
 step_xaudio
