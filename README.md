@@ -1,5 +1,10 @@
 # plutonium-mac-aio
 
+## WARNING
+This repository is the only one OFFICIAL way to play BO1 (multiplayer and zombies) and BO2 (multiplayer, zombies and campaign) on Apple Silicon using Plutonium (Online and Offline).
+THERE WILL NEVER BE A PUBLIC WEBSITE ! The real source is this repo !
+BE CAREFUL !
+
 Play [Plutonium](https://plutonium.pw) Call of Duty: Black Ops (T5) and
 Black Ops II (T6) on an Apple Silicon Mac, with your own copy of CrossOver.
 
@@ -126,6 +131,10 @@ BUILD=1 ./setup.sh
 
 `build/build.sh --check` checks that every patch applies, `tests/sh/run.sh`
 runs the shell tests, and `tests/run.sh` the Wine tests.
+
+## Controller support
+- DualSense (Sony pads through SDL as XInput gamepads (the games read XInput only).
+- Xbox Controller (not tested since I do not have an Xbox Controller but should be supported by Wine).
 
 ## Licenses
 
