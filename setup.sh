@@ -1,11 +1,9 @@
 #!/bin/bash
 # One-time setup of Plutonium BO1/BO2 for this Mac. Safe to run again:
 # finished steps are skipped. See README.md.
-#   ./setup.sh             runner, binaries, prefix, a fresh Plutonium
+#   ./setup.sh             runner, prefix, a fresh Plutonium
 #   ./setup.sh uninstall   remove what setup made (asks first)
 # Options (environment variables):
-#   CROSSOVER_APP=...  CrossOver.app (default /Applications/CrossOver.app)
-#   BUILD=1            build the patched binaries from source instead of downloading them
 #   BO1_DIR=... BO2_DIR=...  game folders, if Steam's libraries do not have them
 set -euo pipefail
 root=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -18,10 +16,8 @@ root=$(cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck source=lib/steam.sh
 . "$root/lib/steam.sh"
 
-crossover=${CROSSOVER_APP:-/Applications/CrossOver.app}
-want_version=26.3.0.39832
 downloads=${AIO_DOWNLOADS:-$root/downloads}
-runner=$root/runner/CrossOver
+runner=$root/runner/engine
 plutonium_rel="drive_c/users/crossover/AppData/Local/Plutonium"
 
 die() { log_error "setup: $*"; exit 1; }
@@ -44,74 +40,28 @@ uninstall() {
   case "$answer" in y|Y|yes) ;; *) echo "nothing removed"; return 1 ;; esac
   [ -x "$runner/bin/wineserver" ] && WINEPREFIX="$root/prefix" "$runner/bin/wineserver" -k 2>/dev/null || true
   for p in "${paths[@]}"; do rm -rf "${root:?}/$p"; done
-  echo "removed (CrossOver.app, Steam and your games were not touched)"
+  echo "removed (Steam and your games were not touched)"
 }
 
 step_preflight() {
-  local version
   [ "$(uname -m)" = arm64 ] || die "this is for Apple Silicon Macs"
   arch -x86_64 /usr/bin/true 2>/dev/null || die "Rosetta is not installed: softwareupdate --install-rosetta"
-  version=$(crossover_version "$crossover") || die "no CrossOver at $crossover (set CROSSOVER_APP)"
-  [ "$version" = "$want_version" ] || die "needs CrossOver $want_version, found $version at $crossover"
   steam_game_dir bo1 > /dev/null || log_info "warning: BO1 not found in Steam's libraries (set BO1_DIR); its native XAudio2 will be missing"
   steam_game_dir bo2 > /dev/null || log_info "warning: BO2 not found in Steam's libraries (set BO2_DIR)"
 }
 
-step_runner() {
-  if [ -d "$runner" ]; then
-    if runner_version_ok "$root" "$crossover"; then skip runner; return; fi
-    printf 'CrossOver changed: rebuild runner? [y/N] '
-    read -r answer || answer=
-    case "$answer" in y|Y|yes) ;; *) die "runner kept; run setup again to rebuild it" ;; esac
-  fi
-  log_info "runner: copying CrossOver's runtime (APFS clone)"
-  runner_create "$root" "$crossover" || die "could not copy $crossover"
-}
-
-step_binaries() {
-  local mark=$root/runner/.binaries tree source url sha
-  if [ "${BUILD:-0}" = 1 ]; then
-    source=build
-  else
-    read -r url sha < <(manifest_get plutonium-mac-aio-bin.tar.gz) || die "manifest.txt has no release archive"
-    source=$sha
-  fi
-  if [ -f "$mark" ] && [ "$(cat "$mark")" = "$source" ]; then skip binaries; return; fi
-  if [ "$source" = build ]; then
-    log_info "binaries: building from source (build/build.sh, logs in build/obj)"
-    "$root/build/build.sh" || die "build failed"
-    tree=$root/build/out
-  else
-    mkdir -p "$downloads"
-    log_info "binaries: downloading the release archive"
-    fetch "$url" "$downloads/plutonium-mac-aio-bin.tar.gz" "$sha" || die "download of the release archive failed: $url"
-    tree=$downloads/bin
-    rm -rf "$tree" && mkdir -p "$tree"
-    tar -xzf "$downloads/plutonium-mac-aio-bin.tar.gz" -C "$tree" || die "release archive is damaged"
-  fi
-  runner_install "$root" "$tree" || die "could not install the binaries"
-  if [ -d "$tree/tests/bin" ]; then
-    rm -rf "$root/tests/bin" && mkdir -p "$root/tests" && cp -R "$tree/tests/bin" "$root/tests/bin"
-  fi
-  done_mark "$mark" "$source"
-}
-
-# The mark holds the archives' checksums, so a new DXMT or MoltenVK in
-# manifest.txt is installed by the next setup run.
+# The mark holds the archive's checksum, so a new DXMT in manifest.txt is
+# installed by the next setup run.
 step_thirdparty() {
-  local mark=$root/runner/.thirdparty names=(dxmt-v0.80-builtin.tar.gz MoltenVK-macos.tar) urls=() shas=() i
-  for i in 0 1; do
-    read -r "urls[$i]" "shas[$i]" < <(manifest_get "${names[$i]}") || die "manifest.txt has no ${names[$i]}"
-  done
-  if [ -f "$mark" ] && [ "$(cat "$mark")" = "${shas[*]}" ]; then skip thirdparty; return; fi
+  local mark=$root/runner/.thirdparty name=dxmt-v0.80-builtin.tar.gz url sha
+  read -r url sha < <(manifest_get "$name") || die "manifest.txt has no $name"
+  if [ -f "$mark" ] && [ "$(cat "$mark")" = "$sha" ]; then skip thirdparty; return; fi
   mkdir -p "$downloads"
-  for i in 0 1; do
-    log_info "downloading ${names[$i]}"
-    fetch "${urls[$i]}" "$downloads/${names[$i]}" "${shas[$i]}" || die "download of ${names[$i]} failed: ${urls[$i]}"
-  done
-  runner_thirdparty "$root" "$downloads" || die "could not install DXMT and MoltenVK"
-  runner_select_d3d9 "$root" dxvk && runner_select_ntdll "$root" fixed || die "could not select DXVK and the patched ntdll"
-  done_mark "$mark" "${shas[*]}"
+  log_info "downloading $name"
+  fetch "$url" "$downloads/$name" "$sha" || die "download of $name failed: $url"
+  runner_thirdparty "$root" "$downloads" || die "could not install DXMT"
+  runner_select_ntdll "$root" fixed || die "could not select the patched ntdll"
+  done_mark "$mark" "$sha"
 }
 
 step_prefix() {
@@ -125,7 +75,6 @@ step_prefix() {
   reg add 'HKCU\Environment' /v WINE_ROSETTA_WOW64_BREAKPOINTS /d 1 /f
   reg add 'HKCU\Environment' /v WINE_ROSETTA_CALL_WORKAROUND /d 1 /f
   reg add 'HKCU\Environment' /v WINE_ROSETTA_LAZY_EXEC /d 1 /f
-  reg add 'HKCU\Environment' /v CX_GRAPHICS_BACKEND /d dxmt /f
   # Sony pads through SDL as XInput gamepads (the games read XInput only).
   reg add 'HKLM\System\CurrentControlSet\Services\WineBus\Devices\054c' /v Hidraw /t REG_DWORD /d 0 /f
   # The launcher's window fails on wined3d's Vulkan renderer with MoltenVK 1.4.2.
@@ -138,7 +87,7 @@ step_prefix() {
 }
 
 # Microsoft's XAudio2 2.7 from BO1's redistributables decodes BO1's xWMA
-# sounds (CrossOver's has no WMA decoder); shared with BO2. Its own step, so
+# sounds (Wine's has no WMA decoder); shared with BO2. Its own step, so
 # that a later run adds it once BO1 can be found.
 step_xaudio() {
   local bo1 cab tmp
@@ -197,8 +146,6 @@ esac
 mkdir -p "$root/logs"
 export AIO_LOG=$root/logs/setup.log
 step_preflight
-step_runner
-step_binaries
 step_thirdparty
 step_prefix
 step_xaudio

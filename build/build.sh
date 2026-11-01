@@ -2,8 +2,6 @@
 # Build the patched binaries from CodeWeavers' CrossOver 26.3 source.
 #   build/build.sh --check            apply every patch to pristine sources, no compile
 #   build/build.sh                    --check, then build into build/out/
-#   build/build.sh --release <ver>    build, then pack build/out/ for a GitHub Release
-#   build/build.sh --pack <ver>       pack the existing build/out/ only
 # AIO_DOWNLOADS overrides the download cache (default: downloads/).
 set -euo pipefail
 root=$(cd -- "$(dirname -- "$0")/.." && pwd)
@@ -95,13 +93,8 @@ build() {
 
   if has wine; then
     echo "building wine (log: $obj/wine/make.log)"
-    build_wine "$tree/wine" "$obj/wine" dlls/ntdll/ntdll.so server/wineserver \
-      dlls/wined3d/i386-windows/wined3d.dll dlls/wined3d/x86_64-windows/wined3d.dll tools/winebuild/winebuild
-    # strip -S: the debug map names every object file by its full path.
-    strip -S -o "$out/bin/wineserver" "$obj/wine/server/wineserver"
-    strip -S -o "$out/lib/wine/x86_64-unix/ntdll.so.fixed" "$obj/wine/dlls/ntdll/ntdll.so"
-    i686-w64-mingw32-strip --strip-debug -o "$out/lib/wine/i386-windows/wined3d.dll.vk" "$obj/wine/dlls/wined3d/i386-windows/wined3d.dll"
-    x86_64-w64-mingw32-strip --strip-debug -o "$out/lib/wine/x86_64-windows/wined3d.dll.vk" "$obj/wine/dlls/wined3d/x86_64-windows/wined3d.dll"
+    # winebuild marks DXVK's d3d9 as a Wine builtin.
+    build_wine "$tree/wine" "$obj/wine" tools/winebuild/winebuild
   fi
   if has legacy; then
     echo "building ntdll with the original 0002 (log: $obj/wine-legacy/make.log)"
@@ -111,6 +104,7 @@ build() {
     cp "$root"/build/legacy/0002-*.patch "$legacy/"
     apply_series wine "$b/legacy-tree" "$legacy"
     build_wine "$b/legacy-tree/wine" "$obj/wine-legacy" dlls/ntdll/ntdll.so
+    # strip -S: the debug map names every object file by its full path.
     strip -S -o "$out/lib/wine/x86_64-unix/ntdll.so.legacy" "$obj/wine-legacy/dlls/ntdll/ntdll.so"
   fi
   if has dxvk; then
@@ -130,29 +124,8 @@ build() {
   (cd "$out" && find . -type f | sort)
 }
 
-# pack <version>: build/plutonium-mac-aio-bin-<version>.tar.gz from build/out,
-# and the manifest.txt line for it.
-pack() {
-  local version=$1 archive sha leaks
-  [ -n "$version" ] || die "--pack and --release need a version, e.g. 0.1.0"
-  [ -d "$out/bin" ] && [ -d "$out/lib" ] || die "nothing to pack: build/out is missing (run build/build.sh)"
-  # The archive is public: no file may carry the builder's home folder.
-  leaks=$(cd "$out" && { grep -r -l -a -F -- "$HOME/" . || true; } | sed 's#^\./##')
-  [ -z "$leaks" ] || die "these files contain $HOME (rebuild with build/build.sh): $leaks"
-  archive=$root/build/plutonium-mac-aio-bin-$version.tar.gz
-  COPYFILE_DISABLE=1 tar -czf "$archive.part" --uid 0 --gid 0 --uname root --gname wheel \
-    -C "$out" --exclude .DS_Store . && mv -f "$archive.part" "$archive" ||
-    die "could not write $archive"
-  sha=$(shasum -a 256 "$archive" | cut -d' ' -f1)
-  echo "release archive: $archive"
-  echo "upload it to the GitHub Release v$version, then put this line in manifest.txt:"
-  echo "plutonium-mac-aio-bin.tar.gz https://github.com/LuidgiAlt/plutonium-mac-aio/releases/download/v$version/plutonium-mac-aio-bin-$version.tar.gz $sha"
-}
-
 case "${1:-}" in
 --check) check ;;
---pack) pack "${2:-}" ;;
---release) [ -n "${2:-}" ] || die "--release needs a version, e.g. 0.1.0"; check && build && pack "$2" ;;
 "") if [ "${AIO_BUILD_TREE:-}" = src ]; then build; else check && build; fi ;;
-*) die "usage: build/build.sh --check | (no argument) | --release <version> | --pack <version>" ;;
+*) die "usage: build/build.sh [--check]" ;;
 esac

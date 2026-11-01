@@ -17,7 +17,6 @@ root=$(cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck source=lib/games.sh
 . "$root/lib/games.sh"
 
-crossover=${CROSSOVER_APP:-/Applications/CrossOver.app}
 plutonium=$root/prefix/drive_c/users/crossover/AppData/Local/Plutonium
 logs=$root/logs
 lock=$logs/.launch.lock
@@ -78,25 +77,17 @@ take_lock() {
 
 # The files the selected options need, before anything is switched.
 check_runner_files() {
-  local rc=$root/runner/CrossOver f
-  for f in "lib/wine/x86_64-unix/ntdll.so.${NTDLL:-fixed}" bin/wineserver \
-           "lib/wine/i386-windows/$([ "${D3D9:-dxvk}" = dxvk ] && echo d3d9.dll.dxvk || echo wined3d.dll.vk)"; do
+  local rc=$root/runner/engine f
+  for f in "lib/wine/x86_64-unix/ntdll.so.${NTDLL:-fixed}" bin/wineserver; do
     [ -f "$rc/$f" ] || stop "$(basename "$f") is missing from the runner: run ./setup.sh again (in $root)."
   done
 }
 
 apply_switches() {
-  local w32=$root/runner/CrossOver/lib/wine/i386-windows syswow64=$WINEPREFIX/drive_c/windows/syswow64
+  local w32=$root/runner/engine/lib/wine/i386-windows syswow64=$WINEPREFIX/drive_c/windows/syswow64
   local bootstrapper='HKCU\Software\Wine\AppDefaults\plutonium-bootstrapper-win32.exe'
   do_select ntdll "${NTDLL:-fixed}"
-  do_select d3d9 "${D3D9:-dxvk}"
-  if [ "${D3D9:-dxvk}" = vulkan ]; then
-    do_reg add 'HKCU\Software\Wine\Direct3D' /v renderer /d vulkan /f
-    do_reg delete "$bootstrapper\\Direct3D" /v renderer /f
-  else
-    do_reg delete 'HKCU\Software\Wine\Direct3D' /v renderer /f
-    do_reg add "$bootstrapper\\Direct3D" /v renderer /d no3d /f
-  fi
+  do_reg add "$bootstrapper\\Direct3D" /v renderer /d no3d /f
   # no3d reports a 128 MB GPU; BO1 reads its video memory through DirectDraw
   # and capped textures to it. 4096 MB is what the GPU renderers report.
   do_reg add "$bootstrapper\\Direct3D" /v VideoMemorySize /d 4096 /f
@@ -104,7 +95,6 @@ apply_switches() {
   set_env WINE_ROSETTA_EXEC_BREAKPOINTS 1
   set_env WINE_ROSETTA_WOW64_BREAKPOINTS 1
   set_env WINE_ROSETTA_CALL_WORKAROUND 1
-  set_env CX_GRAPHICS_BACKEND dxmt
   if [ "${LAZY_EXEC:-1}" = 1 ]; then set_env WINE_ROSETTA_LAZY_EXEC 1; else clear_env WINE_ROSETTA_LAZY_EXEC; fi
   if [ "${SOCKFIX:-1}" = 0 ]; then set_env WINE_SOCK_FASTPATH 0; else clear_env WINE_SOCK_FASTPATH; fi
   if [ -n "${MAXFPS:-}" ]; then set_env DXMT_CONFIG "d3d11.preferredMaxFrameRate=$MAXFPS;"; else clear_env DXMT_CONFIG; fi
@@ -163,23 +153,21 @@ case "${1:-}" in
 kill) use_env; "$WINESERVER" -k 2>/dev/null; exit 0 ;;
 log) open "$logs/last-run.log"; exit $? ;;
 selftest)
-  # The Wine tests (tests/cases.txt) on both renderers, then the legacy
-  # ntdll's basic breakpoint check; the selected renderer and ntdll come
-  # back afterwards. AIO_TEST_RUN replaces tests/run.sh (tests).
-  [ -d "$root/runner/CrossOver" ] || stop "Run ./setup.sh first (in $root)."
+  # The Wine tests (tests/cases.txt), then the legacy ntdll's basic
+  # breakpoint check; the selected ntdll comes back afterwards.
+  # AIO_TEST_RUN replaces tests/run.sh (tests).
+  [ -d "$root/runner/engine" ] || stop "Run ./setup.sh first (in $root)."
   if [ -n "${AIO_TEST_RUN:-}" ]; then read -r -a run <<< "$AIO_TEST_RUN"; else run=("$root/tests/run.sh"); fi
   status=0
-  "${run[@]}" --ntdll fixed --d3d9 both || status=1
+  "${run[@]}" --ntdll fixed || status=1
   "${run[@]}" --ntdll legacy "breakpoint-test self" || status=1
   do_select ntdll "${NTDLL:-fixed}"
-  do_select d3d9 "${D3D9:-dxvk}"
   exit $status ;;
 update|"") ;;
 *) echo "usage: ./launch.sh [kill|update|log|selftest]" >&2; exit 2 ;;
 esac
 
-[ -d "$root/runner/CrossOver" ] && [ -f "$root/prefix/system.reg" ] || stop "Run ./setup.sh first (in $root)."
-runner_version_ok "$root" "$crossover" || stop "CrossOver was updated: run ./setup.sh again (in $root)."
+[ -d "$root/runner/engine" ] && [ -f "$root/prefix/system.reg" ] || stop "Run ./setup.sh first (in $root)."
 problem=$(options_validate 2>&1) || stop "$problem"
 check_runner_files
 use_env

@@ -14,26 +14,23 @@ make_tmp
 r="$tmp/aio repo"
 mkdir -p "$r"
 (cd "$repo_root" && git ls-files -z | xargs -0 tar -cf - 2>/dev/null) | tar -xf - -C "$r"
-export CROSSOVER_APP=$repo_root/tests/fixtures/CrossOver.app AIO_NO_DIALOG=1 LAUNCH_DRY_RUN=1
+export AIO_NO_DIALOG=1 LAUNCH_DRY_RUN=1
 export AIO_WINE=$repo_root/tests/fixtures/wine-stub.sh AIO_WINESERVER=$repo_root/tests/fixtures/wine-stub.sh
-unset D3D9 NTDLL XAUDIO MAXFPS LAZY_EXEC SOCKFIX HUD WINDOWED FULLSCREEN TWEAKS VERBOSE PLUTONIUM_START
+unset NTDLL XAUDIO MAXFPS LAZY_EXEC SOCKFIX HUD WINDOWED FULLSCREEN TWEAKS VERBOSE PLUTONIUM_START
 
 # No runner yet.
 if out=$("$r/launch.sh" 2>&1); then fail "launch without setup succeeded"; fi
 assert_contains "$out" "Run ./setup.sh first"
 
-runner_create "$r" "$CROSSOVER_APP" || fail "runner_create failed"
-w32=$r/runner/CrossOver/lib/wine
-mkdir -p "$w32/x86_64-unix" "$w32/i386-windows"
+w32=$r/runner/engine/lib/wine
+mkdir -p "$w32/x86_64-unix" "$w32/i386-windows" "$r/runner/engine/bin"
+echo wineserver > "$r/runner/engine/bin/wineserver"
 echo fixed > "$w32/x86_64-unix/ntdll.so.fixed"
-echo dxvk > "$w32/i386-windows/d3d9.dll.dxvk"
-echo vk > "$w32/i386-windows/wined3d.dll.vk"
 mkdir -p "$r/prefix/drive_c/users/crossover/AppData/Local/Plutonium/bin"
 echo reg > "$r/prefix/system.reg"
 touch "$r/prefix/drive_c/users/crossover/AppData/Local/Plutonium/plutonium.exe"
 
 out=$("$r/launch.sh" 2>&1) || fail "default launch failed: $out"
-assert_contains "$out" "select d3d9 dxvk"
 assert_contains "$out" "select ntdll fixed"
 assert_contains "$out" 'reg add HKCU\Environment /v WINE_ROSETTA_LAZY_EXEC /d 1 /f'
 assert_contains "$out" 'reg add HKCU\Environment /v WINE_ROSETTA_EXEC_BREAKPOINTS /d 1 /f'
@@ -46,12 +43,11 @@ assert_contains "$out" "Plutonium/plutonium.exe"
 out=$(SOCKFIX=0 "$r/launch.sh" 2>&1) || fail "SOCKFIX=0 launch failed"
 assert_contains "$out" 'reg add HKCU\Environment /v WINE_SOCK_FASTPATH /d 0 /f'
 
-out=$(D3D9=vulkan PLUTONIUM_START=launcher "$r/launch.sh" 2>&1) || fail "vulkan launch failed"
-assert_contains "$out" "select d3d9 vulkan"
+out=$(PLUTONIUM_START=launcher "$r/launch.sh" 2>&1) || fail "launcher start failed"
 assert_contains "$out" "plutonium-launcher-win32.exe"
 
-if out=$(D3D9=foo "$r/launch.sh" 2>&1); then fail "D3D9=foo accepted"; fi
-assert_contains "$out" "bad option: D3D9=foo"
+if out=$(NTDLL=foo "$r/launch.sh" 2>&1); then fail "NTDLL=foo accepted"; fi
+assert_contains "$out" "bad option: NTDLL=foo"
 case "$out" in *select*|*"reg add"*) fail "actions ran before the options were checked" ;; esac
 
 # A launch already running (Review Focus 4: two clicks in quick succession).
@@ -69,7 +65,7 @@ assert_contains "$out" "Plutonium is running. Quit it and start again?"
 rm -rf "$r/logs/.launch.lock"
 
 # A missing file in the runner stops the launch instead of starting on
-# CrossOver's own files (NTDLL=legacy is the documented safety net).
+# the wrong ntdll (NTDLL=legacy is the documented safety net).
 if out=$(NTDLL=legacy "$r/launch.sh" 2>&1); then fail "NTDLL=legacy without ntdll.so.legacy succeeded"; fi
 assert_contains "$out" "ntdll.so.legacy is missing"
 
@@ -77,15 +73,10 @@ assert_contains "$out" "ntdll.so.legacy is missing"
 out=$(LAUNCH_DRY_RUN=0 AIO_STUB_EXIT=3 AIO_PREFIX_RUNNING=0 "$r/launch.sh" 2>&1)
 assert_contains "$out" "Plutonium stopped right away"
 
-# selftest runs the Wine tests on both renderers, the legacy ntdll's
-# breakpoint check, then puts the selected renderer and ntdll back.
+# selftest runs the Wine tests, the legacy ntdll's breakpoint check, then
+# puts the selected ntdll back.
 out=$(AIO_TEST_RUN="echo run" "$r/launch.sh" selftest 2>&1) || fail "selftest failed: $out"
-assert_contains "$out" "run --ntdll fixed --d3d9 both"
+assert_contains "$out" "run --ntdll fixed"
 assert_contains "$out" "run --ntdll legacy breakpoint-test self"
-assert_contains "$out" "select d3d9 dxvk"
-
-# A runner made from another CrossOver build.
-echo 26.3.0.00001 > "$r/runner/.version"
-if out=$("$r/launch.sh" 2>&1); then fail "launch with a stale runner succeeded"; fi
-assert_contains "$out" "CrossOver was updated: run ./setup.sh"
+assert_contains "$out" "select ntdll fixed"
 pass

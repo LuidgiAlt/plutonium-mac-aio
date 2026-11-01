@@ -1,14 +1,12 @@
 # Environment and small helpers shared by setup.sh, launch.sh and the tests.
 # shellcheck shell=bash
 
-# aio_env <root>: the runner (runner/CrossOver) and prefix (prefix/, unless
+# aio_env <root>: the runner (runner/engine) and prefix (prefix/, unless
 # WINEPREFIX is already set) of the project at <root>. Sets $WINE.
 aio_env() {
-  local runner=$1/runner/CrossOver
-  export CX_ROOT="$runner"
+  local runner=$1/runner/engine
   export WINEPREFIX="${WINEPREFIX:-$1/prefix}"
   export WINESERVER="$runner/bin/wineserver"
-  export CX_HOME="$HOME/Library/Application Support/CrossOver"
   export WINEDLLPATH="$runner/lib/wine/x86_64-windows:$runner/lib/wine/x86_64-unix"
   export PATH="$runner/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   export WINEMSYNC=1

@@ -6,7 +6,6 @@
 options_validate() {
   local name value
   bad() { echo "bad option: $1=$2" >&2; return 1; }
-  case "${D3D9:-dxvk}" in dxvk|vulkan) ;; *) bad D3D9 "$D3D9"; return 1 ;; esac
   case "${NTDLL:-fixed}" in fixed|legacy) ;; *) bad NTDLL "$NTDLL"; return 1 ;; esac
   case "${XAUDIO:-native}" in native|builtin) ;; *) bad XAUDIO "$XAUDIO"; return 1 ;; esac
   if [ -n "${MAXFPS:-}" ]; then
