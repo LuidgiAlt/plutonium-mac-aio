@@ -1,4 +1,10 @@
-# plutonium-mac-aio
+# plutonium-mac-aio (CrossOver version)
+
+> **This is the `crossover` branch: the version that runs on your own copy of
+> CrossOver (release v0.1.0). It is kept for reference and is not updated.**
+> The [`main`](https://github.com/LuidgiAlt/plutonium-mac-aio) branch and
+> release v0.2.0 need no CrossOver: they run on a free, self-built Wine
+> engine. Use that one.
 
 ## WARNING
 This repository is the only one OFFICIAL way to play BO1 (multiplayer and zombies) and BO2 (multiplayer, zombies and campaign) on Apple Silicon using Plutonium (Online and Offline).
@@ -24,7 +30,7 @@ Tested on an M1 Pro with CrossOver 26.3.
 ## Install
 
 ```bash
-git clone https://github.com/LuidgiAlt/plutonium-mac-aio.git
+git clone -b crossover https://github.com/LuidgiAlt/plutonium-mac-aio.git
 cd plutonium-mac-aio
 ./setup.sh
 ```
