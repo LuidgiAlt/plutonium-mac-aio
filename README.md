@@ -10,7 +10,10 @@ template, and installs a Wine prefix and a fresh Plutonium, all inside this
 folder. No CrossOver needed.
 Nothing else on the Mac is changed: not Steam, not your games.
 
-Tested on an M1 Pro.
+Tested on an M1 Pro. The older version that runs on your own copy of
+CrossOver (v0.1.0) is on the
+[`crossover`](https://github.com/LuidgiAlt/plutonium-mac-aio/tree/crossover)
+branch.
 
 ## WARNING
 This repository is the only one OFFICIAL way to play BO1 (multiplayer and zombies) and BO2 (multiplayer, zombies and campaign) on Apple Silicon using Plutonium (Online and Offline).
@@ -79,6 +82,14 @@ git pull
 then installs only what changed in `manifest.txt` (a new engine, Sikarugir's
 template or DXMT) and skips the rest: your prefix, Plutonium login and game
 settings stay. No uninstall needed.
+
+**From 0.1.0 (CrossOver):** the same two commands. Setup makes the new runner
+and keeps your prefix, Plutonium login and game settings; CrossOver is no
+longer used. The old runner can then be removed:
+
+```bash
+rm -rf runner/CrossOver runner/.binaries
+```
 
 ## Troubleshooting
 
