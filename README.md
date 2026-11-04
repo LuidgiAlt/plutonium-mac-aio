@@ -170,7 +170,7 @@ and the test programs for a release and prints its `manifest.txt` line.
 
 ## Licenses
 
-- Scripts and test programs: MIT (`LICENSE`).
+- Scripts and test programs: GPL-3.0-or-later (`LICENSE`); up to v0.2.0 they were MIT.
 - Wine patches and the engine built from them: LGPL-2.1-or-later, built from
   CodeWeavers' published source `crossover-sources-26.3.0.tar.gz`
   (https://media.codeweavers.com/pub/crossover/source/).
