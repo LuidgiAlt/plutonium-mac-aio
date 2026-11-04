@@ -58,6 +58,7 @@ The Plutonium launcher opens; pick BO1 or BO2 there. Run it from Terminal.
 | `WINDOWED=1` / `FULLSCREEN=1` | Display mode for both games (BO2: its own options win) |
 | `TWEAKS=0` | Keep BO1's blur, distortion and frame cap (turned off by default for speed) |
 | `XAUDIO=builtin` | Wine's XAudio2 instead of Microsoft's (BO1 gunfire is then silent) |
+| `MOUSE_COALESCING=1` | macOS's batching of mouse moves, one batch per display refresh (off by default from the engine after 0.2.0: every mouse report reaches the game, which matters most with 500–1000 Hz mice) |
 | `NTDLL=legacy` | Older breakpoint emulation, if Plutonium hangs at "Loading fastfile" |
 | `PLUTONIUM_START=launcher` | Skip Plutonium's updater |
 | `VERBOSE=1` | More Wine errors in the log |
@@ -142,6 +143,7 @@ them.
 | wine 0004 | Pages become executable on first use instead of trapping every write (stutter) |
 | wine 0015 | PulseEvent yields only when needed (BO2 multiplayer) |
 | wine 0021 | Empty socket receives answered without wineserver (online stutter) |
+| wine 0022 | Every mouse report reaches the game instead of one batch per display refresh (high-rate mice) |
 | wine 0003, 0005–0019 | wined3d's Vulkan renderer for Direct3D 9 (BO1 uses DXVK) |
 | dxvk 0001–0003 | DXVK 1.10.3 on MoltenVK 1.4.2 for BO1 |
 

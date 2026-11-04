@@ -97,6 +97,7 @@ apply_switches() {
   set_env WINE_ROSETTA_CALL_WORKAROUND 1
   if [ "${LAZY_EXEC:-1}" = 1 ]; then set_env WINE_ROSETTA_LAZY_EXEC 1; else clear_env WINE_ROSETTA_LAZY_EXEC; fi
   if [ "${SOCKFIX:-1}" = 0 ]; then set_env WINE_SOCK_FASTPATH 0; else clear_env WINE_SOCK_FASTPATH; fi
+  if [ "${MOUSE_COALESCING:-0}" = 1 ]; then set_env WINE_MOUSE_COALESCING 1; else clear_env WINE_MOUSE_COALESCING; fi
   if [ -n "${MAXFPS:-}" ]; then set_env DXMT_CONFIG "d3d11.preferredMaxFrameRate=$MAXFPS;"; else clear_env DXMT_CONFIG; fi
   if [ "${HUD:-0}" = 1 ]; then set_env MTL_HUD_ENABLED 1; else clear_env MTL_HUD_ENABLED; fi
   set_env DXVK_ASYNC "${DXVK_ASYNC:-1}"

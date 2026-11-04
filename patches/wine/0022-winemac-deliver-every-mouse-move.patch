@@ -1,0 +1,41 @@
+Subject: winemac.drv: deliver every mouse move (no AppKit coalescing)
+Date: 2026-11-02
+Applies to: CrossOver 26.3.0 Wine sources, after 0021
+Files changed: dlls/winemac.drv/cocoa_app.m
+
+AppKit coalesces mouse-moved events by default: the moves a mouse reports
+between two display refreshes reach the program as one event, so a program
+never gets more mouse events per second than the display refreshes. Games
+read those moves as relative motion every frame; with a 500-1000 Hz mouse,
+4-8 reports are merged per refresh and arrive in uneven batches against the
+game's frames (also on CrossOver). The Mac driver now turns coalescing off
+when it makes the process a foreground app, so every report arrives.
+WINE_MOUSE_COALESCING=1 keeps AppKit's default.
+
+Measured with a raw-input test program (cursor clipped and hidden, as the
+games do) on a 120 Hz display with a 125 Hz mouse: 119-120 events/s with
+coalescing (the refresh rate), 125/s without (every report), in each of four
+runs. With a 125 Hz mouse that is a small gain; it grows with the mouse's
+report rate. No extra cost was seen.
+
+---
+--- a/dlls/winemac.drv/cocoa_app.m
++++ b/dlls/winemac.drv/cocoa_app.m
+@@ -336,6 +336,17 @@
+                                                                 reason:@"Running Windows program"] retain]; // intentional leak
+             }
+ 
++            /* AppKit coalesces mouse moves to at most one event per display
++             * refresh. Games read every move as relative motion, and a
++             * 500-1000 Hz mouse then arrives in uneven batches against the
++             * game's frames. Deliver every report unless
++             * WINE_MOUSE_COALESCING=1. */
++            {
++                const char *coalescing = getenv("WINE_MOUSE_COALESCING");
++                if (!coalescing || strcmp(coalescing, "1"))
++                    [NSEvent setMouseCoalescingEnabled:NO];
++            }
++
+             mainMenu = [[[NSMenu alloc] init] autorelease];
+ 
+             // Application menu

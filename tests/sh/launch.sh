@@ -16,7 +16,7 @@ mkdir -p "$r"
 (cd "$repo_root" && git ls-files -z | xargs -0 tar -cf - 2>/dev/null) | tar -xf - -C "$r"
 export AIO_NO_DIALOG=1 LAUNCH_DRY_RUN=1
 export AIO_WINE=$repo_root/tests/fixtures/wine-stub.sh AIO_WINESERVER=$repo_root/tests/fixtures/wine-stub.sh
-unset NTDLL XAUDIO MAXFPS LAZY_EXEC SOCKFIX HUD WINDOWED FULLSCREEN TWEAKS VERBOSE PLUTONIUM_START
+unset NTDLL XAUDIO MAXFPS LAZY_EXEC SOCKFIX MOUSE_COALESCING HUD WINDOWED FULLSCREEN TWEAKS VERBOSE PLUTONIUM_START
 
 # No runner yet.
 if out=$("$r/launch.sh" 2>&1); then fail "launch without setup succeeded"; fi
@@ -42,6 +42,9 @@ assert_contains "$out" "Plutonium/plutonium.exe"
 
 out=$(SOCKFIX=0 "$r/launch.sh" 2>&1) || fail "SOCKFIX=0 launch failed"
 assert_contains "$out" 'reg add HKCU\Environment /v WINE_SOCK_FASTPATH /d 0 /f'
+assert_contains "$out" 'reg delete HKCU\Environment /v WINE_MOUSE_COALESCING /f'
+out=$(MOUSE_COALESCING=1 "$r/launch.sh" 2>&1) || fail "MOUSE_COALESCING=1 launch failed"
+assert_contains "$out" 'reg add HKCU\Environment /v WINE_MOUSE_COALESCING /d 1 /f'
 
 out=$(PLUTONIUM_START=launcher "$r/launch.sh" 2>&1) || fail "launcher start failed"
 assert_contains "$out" "plutonium-launcher-win32.exe"

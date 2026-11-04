@@ -11,7 +11,7 @@ options_validate() {
   if [ -n "${MAXFPS:-}" ]; then
     case "$MAXFPS" in ''|*[!0-9]*|0*) bad MAXFPS "$MAXFPS"; return 1 ;; esac
   fi
-  for name in LAZY_EXEC SOCKFIX HUD WINDOWED FULLSCREEN TWEAKS VERBOSE DXVK_ASYNC; do
+  for name in LAZY_EXEC SOCKFIX MOUSE_COALESCING HUD WINDOWED FULLSCREEN TWEAKS VERBOSE DXVK_ASYNC; do
     eval "value=\${$name:-}"
     case "$value" in ''|0|1) ;; *) bad "$name" "$value"; return 1 ;; esac
   done
