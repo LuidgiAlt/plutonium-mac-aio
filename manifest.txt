@@ -8,4 +8,4 @@ plutonium.exe https://cdn.plutonium.pw/updater/plutonium.exe -
 # Sikarugir's wrapper template: the runner, and the x86_64 libraries the engine links against.
 Sikarugir-Template.tar.xz https://github.com/Sikarugir-App/Template/releases/download/v1.0/Template-1.0.24.tar.xz 4b5f89eeb9ef139936bdfad33d9b420b05ea4597cb7d63376674f7a8e171321c
 # The engine and test programs of this release (build/build.sh --pack 0.2.0).
-plutonium-mac-aio-engine.tar.xz https://github.com/LuidgiAlt/plutonium-mac-aio/releases/download/v0.2.0/plutonium-mac-aio-engine-0.2.0.tar.xz dbccced60a71743d76c4b33d3916bc22132806be9aa3790ce93d963a26a7b056
+plutonium-mac-aio-engine.tar.xz https://github.com/LuidgiAlt/plutonium-mac-aio/releases/download/v0.2.1/plutonium-mac-aio-engine-0.2.1.tar.xz c9e1861556acfcc1af3b81e6bc2ce62a184d2e3ec77b678a53a9586c796bf3c1

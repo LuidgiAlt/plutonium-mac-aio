@@ -58,7 +58,7 @@ The Plutonium launcher opens; pick BO1 or BO2 there. Run it from Terminal.
 | `WINDOWED=1` / `FULLSCREEN=1` | Display mode for both games (BO2: its own options win) |
 | `TWEAKS=0` | Keep BO1's blur, distortion and frame cap (turned off by default for speed) |
 | `XAUDIO=builtin` | Wine's XAudio2 instead of Microsoft's (BO1 gunfire is then silent) |
-| `MOUSE_COALESCING=1` | macOS's batching of mouse moves, one batch per display refresh (off by default from the engine after 0.2.0: every mouse report reaches the game, which matters most with 500–1000 Hz mice) |
+| `MOUSE_COALESCING=1` | macOS's batching of mouse moves, one batch per display refresh (off by default from engine 0.2.1: every mouse report reaches the game, which matters most with 500–1000 Hz mice) |
 | `X87=0` | Without the x87 acceleration (see How it works) |
 | `NTDLL=legacy` | Older breakpoint emulation, if Plutonium hangs at "Loading fastfile" |
 | `PLUTONIUM_START=launcher` | Skip Plutonium's updater |
