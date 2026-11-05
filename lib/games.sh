@@ -26,8 +26,8 @@ bo1_seed() {
 }
 
 # bo1_prepare <plutonium_dir>: BO1 (T5). Blur, distortion and the frame cap
-# off unless TWEAKS=0 (they cost a lot under Rosetta). A mode with no config
-# yet gets a safe first one.
+# off unless TWEAKS=0 (they cost a lot under Rosetta); MAXFPS=<n> caps the
+# frame rate instead. A mode with no config yet gets a safe first one.
 bo1_prepare() {
   local cfg
   if [ -d "$1/storage/t5" ]; then
@@ -43,6 +43,7 @@ bo1_prepare() {
       set_cvar "$cfg" r_distortion 0
       set_cvar "$cfg" com_maxfps 0
     fi
+    if [ -n "${MAXFPS:-}" ]; then set_cvar "$cfg" com_maxfps "$MAXFPS"; fi
   done
   return 0
 }

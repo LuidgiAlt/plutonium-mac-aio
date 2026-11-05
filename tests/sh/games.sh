@@ -14,7 +14,7 @@ t5=$p/storage/t5/players/config_mp.cfg t6=$p/storage/t6/players/plutonium_mp.cfg
 t6_before=$(cat "$t6")
 t5sp=$p/storage/t5/players/config.cfg
 
-unset TWEAKS WINDOWED FULLSCREEN
+unset TWEAKS WINDOWED FULLSCREEN MAXFPS
 bo1_prepare "$p"
 assert_contains "$(cat "$t5")" 'seta r_aaSamples "4"'
 assert_contains "$(cat "$t5")" 'seta r_blur_allowed "0"'
@@ -33,6 +33,11 @@ case "$(cat "$t5")" in *com_first_time_pc*) fail "bo1_prepare replaced an existi
 echo 'seta sm_enable "1"' >> "$t5sp"
 bo1_prepare "$p"
 assert_contains "$(cat "$t5sp")" 'seta sm_enable "1"'
+
+MAXFPS=60 bo1_prepare "$p"
+assert_contains "$(cat "$t5")" 'seta com_maxfps "60"'
+bo1_prepare "$p"
+assert_contains "$(cat "$t5")" 'seta com_maxfps "0"'
 
 t5_before=$(cat "$t5")
 bo2_prepare "$p"

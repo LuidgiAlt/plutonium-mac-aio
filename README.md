@@ -54,7 +54,7 @@ The Plutonium launcher opens; pick BO1 or BO2 there. Run it from Terminal.
 | Option | Effect |
 |---|---|
 | `HUD=1` | Apple's Metal performance HUD (frame rate) |
-| `MAXFPS=<n>` | Cap BO2's frame rate, e.g. `MAXFPS=60` |
+| `MAXFPS=<n>` | Cap the frame rate of both games, e.g. `MAXFPS=60` (see Frame pacing) |
 | `WINDOWED=1` / `FULLSCREEN=1` | Display mode for both games (BO2: its own options win) |
 | `TWEAKS=0` | Keep BO1's blur, distortion and frame cap (turned off by default for speed) |
 | `XAUDIO=builtin` | Wine's XAudio2 instead of Microsoft's (BO1 gunfire is then silent) |
@@ -116,6 +116,17 @@ rm -rf runner/CrossOver runner/.binaries
 - **BO1 shadows** are kept off in new configs (`sm_enable "0"`).
 - **Plutonium's installer** cannot be pinned by hash (Plutonium updates it);
   setup checks that it is a signed Windows program.
+
+## Frame pacing
+
+A display shows a new frame only at its refresh (every 8.3 ms at 120 Hz).
+A game that renders at, say, 100 FPS has some frames shown after one refresh
+and others after two, so motion moves in uneven steps even at a high frame
+rate. `HUD=1 ./launch.sh` shows the frame times as a graph.
+
+If the frame rate swings below the refresh rate, cap it at a whole fraction
+of the refresh that the game always holds, e.g. `MAXFPS=60 ./launch.sh` on a
+120 Hz display: every frame then stays on screen for exactly two refreshes.
 
 ## How it works
 
