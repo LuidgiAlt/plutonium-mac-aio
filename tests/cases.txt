@@ -43,3 +43,5 @@ d3d9-shaderswitch-test|-|-|dxvk|-
 d3d9-async-burst-test|DXVK_ASYNC=1|-|dxvk|-
 # BO2 renderer: Direct3D 11 through DXMT.
 d3d11-dxmt-test|-|-|-|-
+# x87 maths under the x87sidecar (0023): the test and its child both log that acceleration is on.
+x87-sidecar-test|WINE_X87_SIDECAR=x87-sidecar-test.exe|-|-|count:x87 acceleration on for this process==2

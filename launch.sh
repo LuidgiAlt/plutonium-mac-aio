@@ -98,6 +98,9 @@ apply_switches() {
   if [ "${LAZY_EXEC:-1}" = 1 ]; then set_env WINE_ROSETTA_LAZY_EXEC 1; else clear_env WINE_ROSETTA_LAZY_EXEC; fi
   if [ "${SOCKFIX:-1}" = 0 ]; then set_env WINE_SOCK_FASTPATH 0; else clear_env WINE_SOCK_FASTPATH; fi
   if [ "${MOUSE_COALESCING:-0}" = 1 ]; then set_env WINE_MOUSE_COALESCING 1; else clear_env WINE_MOUSE_COALESCING; fi
+  # x87 maths through the x87sidecar (patch 0023), only in the process both
+  # games run in.
+  if [ "${X87:-1}" = 1 ]; then set_env WINE_X87_SIDECAR plutonium-bootstrapper-win32.exe; else clear_env WINE_X87_SIDECAR; fi
   if [ -n "${MAXFPS:-}" ]; then set_env DXMT_CONFIG "d3d11.preferredMaxFrameRate=$MAXFPS;"; else clear_env DXMT_CONFIG; fi
   if [ "${HUD:-0}" = 1 ]; then set_env MTL_HUD_ENABLED 1; else clear_env MTL_HUD_ENABLED; fi
   set_env DXVK_ASYNC "${DXVK_ASYNC:-1}"
@@ -125,6 +128,17 @@ start_target() {
   echo "$plutonium/bin/plutonium-launcher-win32.exe"
 }
 
+# x87_check <log>: say when the x87sidecar ended the game or could not hook
+# Rosetta, and how to play without it.
+x87_check() {
+  if grep -q "rosettax87 stub abort" "$1"; then
+    dialog "The x87 acceleration ended the game (see the log). To play without it: X87=0 ./launch.sh" OK > /dev/null
+  elif grep -q -e "no x87 acceleration" -e "RUNNING WITHOUT X87 ACCELERATION" "$1"; then
+    echo "note: the game ran without x87 acceleration (see ./launch.sh log); X87=0 ./launch.sh turns it off" >&2
+  fi
+  return 0
+}
+
 # Keeps the last 3 logs; caps each at 50 MB without stopping Wine. Returns
 # when everything in the prefix has ended, so the lock covers the session.
 run_logged() {
@@ -142,12 +156,13 @@ run_logged() {
       if [ "$(dialog "Plutonium stopped right away. Last lines of the log:
 
 $(tail -n 20 "$log")" "Open log" "OK")" = "Open log" ]; then open "$log"; fi
+      x87_check "$log"
       return 1
     fi
   fi
   wait "$pid"
   "$WINESERVER" -w 2>/dev/null
-  return 0
+  x87_check "$log"
 }
 
 case "${1:-}" in

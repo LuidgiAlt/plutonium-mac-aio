@@ -59,6 +59,7 @@ The Plutonium launcher opens; pick BO1 or BO2 there. Run it from Terminal.
 | `TWEAKS=0` | Keep BO1's blur, distortion and frame cap (turned off by default for speed) |
 | `XAUDIO=builtin` | Wine's XAudio2 instead of Microsoft's (BO1 gunfire is then silent) |
 | `MOUSE_COALESCING=1` | macOS's batching of mouse moves, one batch per display refresh (off by default from the engine after 0.2.0: every mouse report reaches the game, which matters most with 500–1000 Hz mice) |
+| `X87=0` | Without the x87 acceleration (see How it works) |
 | `NTDLL=legacy` | Older breakpoint emulation, if Plutonium hangs at "Loading fastfile" |
 | `PLUTONIUM_START=launcher` | Skip Plutonium's updater |
 | `VERBOSE=1` | More Wine errors in the log |
@@ -100,6 +101,7 @@ rm -rf runner/CrossOver runner/.binaries
 | "build failed" (`BUILD=1`) | Read the log it names; check the tools in Building from source. |
 | "Plutonium is running" | A launch is still running; *Quit and restart* stops it. |
 | "Plutonium stopped right away" | Read the log shown; try `VERBOSE=1 ./launch.sh`. |
+| A crash or glitch that goes away with `X87=0` | Please report it with the log; play with `X87=0 ./launch.sh` meanwhile. |
 | Hangs at "Loading fastfile" | `NTDLL=legacy ./launch.sh` |
 | BO2 crashes on start | Usually a BO2 profile asking for 8x MSAA (see Known issues). |
 | Stutter in the first half-minute | Shaders are compiled and cached; wait in the menu, it gets better as you play. |
@@ -135,6 +137,22 @@ of the refresh that the game always holds, e.g. `MAXFPS=60 ./launch.sh` on a
 (`build/out/wswine.bundle`): MoltenVK 1.4.2, DXVK's `d3d9.dll` and a second,
 older breakpoint ntdll (`NTDLL=legacy`) are inside. Its 32-bit Windows code
 uses SSE maths: the x87 code mingw makes by default is slow under Rosetta.
+
+The games' own physics and effects code uses x87 maths too, which Rosetta
+translates slowly: in heavy moments the game's threads, not the GPU, set the
+frame rate. The engine starts the Plutonium bootstrapper, the process both
+games run in, under x87sidecar (`x87sidecar/`, a reduced and hardened build
+of [x87sidecar](https://github.com/athei/x87sidecar) 1.9.1): it hooks
+Rosetta's translator and turns runs of x87 instructions into native ARM64
+code (patch 0023). Measured on an M1 Pro in
+back-to-back sessions: BO2 Zombies' lowest second went from 37 to 100 FPS,
+BO1 multiplayer from 80 to 112 FPS on average, and the BO1 campaign from 72
+to 104 FPS with 2 seconds under 60 FPS instead of 134 (its sound, choppy
+before, is clean). Each game's log says `x87 acceleration on`; if it cannot
+hook Rosetta (after a macOS update, for example), or the x87sidecar stops,
+the game keeps running at the old speed.
+`X87=0 ./launch.sh` turns it off.
+
 The engine links against the x86_64 libraries of Sikarugir's wrapper
 template (FreeType, gnutls, SDL2), pinned in `manifest.txt`.
 
@@ -155,6 +173,7 @@ them.
 | wine 0015 | PulseEvent yields only when needed (BO2 multiplayer) |
 | wine 0021 | Empty socket receives answered without wineserver (online stutter) |
 | wine 0022 | Every mouse report reaches the game instead of one batch per display refresh (high-rate mice) |
+| wine 0023 | The games' process starts under x87sidecar: faster x87 maths (heavy-moment frame drops) |
 | wine 0003, 0005–0019 | wined3d's Vulkan renderer for Direct3D 9 (BO1 uses DXVK) |
 | dxvk 0001–0003 | DXVK 1.10.3 on MoltenVK 1.4.2 for BO1 |
 
@@ -168,7 +187,7 @@ time). To build and use your own instead:
 
 ```bash
 xcode-select --install
-brew install mingw-w64 bison flex meson ninja glslang sdl2
+brew install mingw-w64 bison flex meson ninja glslang sdl2 cmake
 BUILD=1 ./setup.sh
 ```
 
@@ -189,6 +208,9 @@ and the test programs for a release and prints its `manifest.txt` line.
   (https://media.codeweavers.com/pub/crossover/source/).
 - DXVK patches and DXVK's `d3d9.dll`: zlib, from the same source archive.
 - MoltenVK 1.4.2 inside the engine: Apache-2.0, from Khronos' release.
+- x87sidecar inside the engine (`bin/x87sidecar`): MIT, built from
+  `x87sidecar/`, derived from https://github.com/athei/x87sidecar 1.9.1; its
+  license is in `x87sidecar/LICENSE` and `share/doc/x87sidecar/LICENSE`.
 - Sikarugir's wrapper template, DXMT and Plutonium are downloaded by setup
   from their own releases; they are not part of this repository or its
   release.

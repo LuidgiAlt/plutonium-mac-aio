@@ -1,0 +1,413 @@
+#pragma once
+
+#include <cstdint>
+
+#include "rosetta_core/AssemblerHelpers.hpp"
+#include "rosetta_core/Register.h"
+#include "rosetta_core/TranslationResult.h"
+#include "rosetta_core/TranslatorHelpers.hpp"
+#include "rosetta_core/X87State.h"
+
+// =============================================================================
+// X87State layout constants  (all offsets within X87State, relative to Xbase)
+//
+//   Private compact X87State (packed, 0x48 bytes, inside one reply)
+//   +0x00  uint16_t  control_word
+//   +0x02  uint16_t  status_word    ← TOP in bits [13:11]
+//   +0x04  int16_t   tag_word
+//   +0x06  padding for alignment
+//   +0x08  double st[8]         ← stride 0x08 bytes each
+//
+//   st[i] mantissa offset = 0x08 + i * 0x08
+//
+//   X18 = thread context pointer (Apple AArch64 ABI, always valid, never clobber)
+//   Xbase = X18 + result.thread_context_offsets->x87_state_offset
+// =============================================================================
+
+static constexpr int kX87ThreadReg = GPR::X18;                                   // X18
+static constexpr int16_t kX87StatusWordOff = offsetof(X87State, status_word);    // 0x02;
+static constexpr int16_t kX87ControlWordOff = offsetof(X87State, control_word);  // 0x00;
+static constexpr int16_t kX87TagWordOff = offsetof(X87State, tag_word);          // 0x04;
+static constexpr int16_t kX87RegFileOff = offsetof(X87State, st);                // 0x08
+static constexpr int kX87RegStride = sizeof(double);                             // 0x08
+
+static_assert(kX87ThreadReg == GPR::X18, "kX87ThreadReg must be X18");
+static_assert(kX87StatusWordOff == 0x02, "Invalid offset for status_word");
+static_assert(kX87ControlWordOff == 0x00, "Invalid offset for control_word");
+static_assert(kX87TagWordOff == 0x04, "Invalid offset for tag_word");
+static_assert(kX87RegFileOff == 0x08, "Invalid offset for st[] base");
+static_assert(kX87RegStride == 0x08, "Invalid stride for st[] registers");
+
+// The native slot layout keeps the working binary64 value of each register in the
+// first 8 bytes of its native 80-bit slot, at +6 + 10 * phys, so converting
+// one slot leaves its neighbours alone.  Code that has the TranslationResult
+// reads X87Cache::native_slots; the slot helpers below (emit_load_st,
+// emit_store_st, emit_store_st_at_offset, emit_x87_perm_flush), which do not
+// have it, read g_x87_native_layout.  Translator::translate_instruction sets
+// both for one reply at a time.
+static constexpr int16_t kX87NativeSlotOff = 6;
+static constexpr int kX87NativeSlotStride = 10;
+inline thread_local bool g_x87_native_layout = false;
+
+// What Xst_base points at in the reply `c` belongs to: the compact st[]
+// array, or native slot 0.
+inline int16_t x87_st_base_off(const X87Cache& c) {
+    return c.native_slots != 0 ? kX87NativeSlotOff : kX87RegFileOff;
+}
+
+// The slot tracker (X87Cache::slot_fmt, top_rel) of the reply being
+// translated in the native layout, or nullptr.  Every change the emitters
+// make to the TOP register is noted below, and every slot access goes
+// through emit_load_st and emit_store_st, which note the read or write with
+// the depth relative to the TOP register at that point.  A read of a slot
+// still holding Rosetta's 80-bit value means a conversion was missed: it is
+// recorded like an allocation failure, so the request is declined to stock.
+// All of these do nothing while the tracker is unset.
+inline thread_local TranslationResult* g_x87_slot_tracker = nullptr;
+void x87_slot_note_read(int stack_depth);
+void x87_slot_note_write(int stack_depth);
+// n pushes; the new slots will hold binary64 values.
+void x87_slot_note_push(int n);
+// n pops from the current TOP; the popped slots become dead.
+void x87_slot_note_pop(int n);
+// fincstp (+1) and fdecstp (-1): TOP moves, every slot keeps its format.
+void x87_slot_note_rotate(int delta);
+// ffree: the slot at depth stack_depth becomes dead.
+void x87_slot_note_free(int stack_depth);
+// fsave and frstor set TOP from somewhere the reply cannot know statically;
+// the tracker restarts at that TOP with every slot in format `fmt`.
+void x87_slot_note_reanchor(uint8_t fmt);
+// True when the tracker is set and the slot at depth stack_depth still holds
+// an 80-bit value, which fld m80 and fstp m80 copy as ten bytes.
+bool x87_slot_is_native(int stack_depth);
+// The slot at depth stack_depth now holds an 80-bit value (fld m80).
+void x87_slot_note_native(int stack_depth);
+// The slots at the two depths traded contents (an FXCH done in memory).
+void x87_slot_note_swap(int depth_a, int depth_b);
+// True when the tracker is set and the slot's bytes are an 80-bit image,
+// live (kSlotNative) or popped (kSlotDeadNative).  The exact paths copy such
+// a slot as ten bytes instead of reading it as binary64.
+bool x87_slot_holds_f80_at(int stack_depth);
+// True when flushing `perm` (emit_x87_perm_flush) moves a slot that holds
+// an 80-bit image; the flush then moves every slot it permutes as ten bytes
+// and its callers pass the two extra FPRs that takes.
+bool x87_perm_moves_f80(const int8_t perm[8]);
+
+static constexpr int kX87TopShift = 11;  // TOP LSB position in status_word
+static constexpr int kX87TopMask = 0x7;
+// x87 condition code bit positions in status_word
+static constexpr int kX87C0Bit = 8;
+static constexpr int kX87C2Bit = 10;
+static constexpr int kX87C3Bit = 14;
+
+// =============================================================================
+// 2a — X87State base address
+//
+// Emits:  ADD Xd, X18, #x87_state_offset
+//
+// x87_state_offset is read from result at translation time — constant for the
+// emitted code. Must be called at the top of every translate_f*() function.
+// =============================================================================
+
+auto emit_x87_base(AssemblerBuffer& buf, const TranslationResult& translation, int Xd) -> void;
+
+void emit_x87_base_and_top(AssemblerBuffer& buf, const TranslationResult& translation, int Xbase,
+                           int Wd_top);
+
+// =============================================================================
+// 2b — TOP load
+//
+// Emits:
+//   LDRH  Wd, [Xbase, #0x02]   ; load status_word
+//   LSR   Wd, Wd, #11          ; shift TOP field down to bit 0
+//   AND   Wd, Wd, #7           ; mask to 3 bits, result in [0..7]
+//
+// Xbase must already hold the X87State base address (from emit_x87_base).
+// =============================================================================
+void emit_load_top(AssemblerBuffer& buf, const TranslationResult& translation, int Xbase,
+                   int Wd_top);
+
+// =============================================================================
+// 2c — TOP write-back
+//
+// Emits:
+//   LDRH  Wd_tmp, [Xbase, #0x02]        ; reload status_word
+//   BFI   Wd_tmp, Wd_new_top, #11, #3   ; insert TOP into bits [13:11]
+//   STRH  Wd_tmp, [Xbase, #0x02]        ; write back
+//
+// Wd_tmp must be distinct from Wd_new_top.
+// =============================================================================
+
+auto emit_store_top(AssemblerBuffer& buf, int Xbase, int Wd_new_top, int Wd_tmp) -> void;
+
+// =============================================================================
+// 2d — ST(i) byte offset computation
+//
+// Computes into Wd_offset: 0x06 + Wd_index * 0x0A
+//
+// Emits (multiply-by-10 via shifts):
+//   LSL   Wd_offset, Wd_index, #3            ; * 8
+//   ADD   Wd_offset, Wd_offset, Wd_index, LSL #1  ; + * 2  =  * 10
+//   ADD   Wd_offset, Wd_offset, #0x06        ; + st[] base offset
+//
+// Wd_index and Wd_offset may be the same register.
+// =============================================================================
+
+// =============================================================================
+// 2d — Physical register index for ST(i)
+//
+// Computes into Wd_out: (Wd_top + stack_depth) & 7
+//
+// For stack_depth == 0 and Wd_out != Wd_top: emits MOV.
+// For stack_depth == 0 and Wd_out == Wd_top: no instructions.
+// For stack_depth > 0: ADD + AND (2 instructions).
+// =============================================================================
+
+auto emit_phys_index(AssemblerBuffer& buf, int Wd_top, int stack_depth, int Wd_out) -> void;
+
+// Native layout: Wd_key = 10 * ((Wd_top + stack_depth) & 7), the byte offset
+// of the slot from native slot 0.  UBFIZ (and an ADD before it for a nonzero
+// depth), then ADD Wd_key, Wd_key, Wd_key, LSL #2.
+void emit_native_slot_key(AssemblerBuffer& buf, int Wd_top, int stack_depth, int Wd_key);
+
+// Native layout: Wd = 6 + 10 * (Wphys & 7), the slot's offset from Xbase.
+void emit_native_slot_offset(AssemblerBuffer& buf, int Wphys, int Wd);
+
+// Native layout: the ten bytes of the slot at stack_depth into Dd (bytes 0-7)
+// and Hd (bytes 8-9), or from them back into the slot when `store`.  Wd_tmp
+// is clobbered.
+void emit_native_slot_image(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth,
+                            int Wd_tmp, int Dd, int Hd, int Xbase_st, bool store);
+
+// Native layout: Xd = the address of the slot at stack_depth, from Xbase_st
+// (= Xbase + 6) when pinned, otherwise from Xbase.  Wd_top is read only.
+void emit_native_st_addr(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth, int Xd,
+                         int Xbase_st);
+
+// =============================================================================
+// 2f — Load ST(i) mantissa into a D register
+//
+// Stride-8 layout: when Xbase_st >= 0 (pointer to &st[0]), uses AArch64
+// scaled register-offset addressing: LDR Dd, [Xbase_st, Widx, SXTW #3].
+// This is 1 instruction for depth=0, 3 for depth>0 (phys_index + LDR).
+//
+// When Xbase_st < 0 (uncached): computes byte offset from Xbase and uses
+// unscaled register-offset addressing (2–4 instructions).
+//
+// After return, the function returns the "key register" for use with
+// emit_store_st_at_offset:
+//   - Wd_top when depth=0 and Xbase_st >= 0 (no MOV emitted — 1 insn saved)
+//   - Wd_tmp otherwise
+// =============================================================================
+
+auto emit_load_st(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth, int Wd_tmp, int Dd,
+                  int Xbase_st = -1) -> int;
+
+// =============================================================================
+// 2g — Store a D register into ST(i) mantissa
+//
+// Same dual-mode as emit_load_st.  Wd_tmp is clobbered.
+// =============================================================================
+
+auto emit_store_st(AssemblerBuffer& buf, int Xbase, int Wd_top, int stack_depth, int Wd_tmp, int Dd,
+                   int Xbase_st = -1) -> void;
+
+// =============================================================================
+// 2g-reuse — Store using the index/offset left in Wd_key by a prior load/store
+//
+// When Xbase_st >= 0: Wd_key is a physical index → STR [Xbase_st, Wd_key, SXTW #3]
+// When Xbase_st < 0:  Wd_key is a byte offset    → STR [Xbase, Wd_key, SXTW]
+// =============================================================================
+
+void emit_store_st_at_offset(AssemblerBuffer& buf, int Xbase, int Wd_key, int Dd,
+                             int Xbase_st = -1);
+// =============================================================================
+// 2h — x87 stack push  (TOP decrement)
+//
+// new_TOP = (TOP - 1) & 7, written back into status_word bits [13:11].
+//
+// Emits:
+//   SUB   Wd_top, Wd_top, #1
+//   AND   Wd_top, Wd_top, #7
+//   <emit_store_top>
+//
+// Wd_top is updated in place and holds new TOP on return.
+// Wd_tmp is scratch for the status_word read-modify-write inside emit_store_top.
+// =============================================================================
+
+// =============================================================================
+// 2h — x87 stack push  (TOP decrement + tag word clear)
+//
+// Mirrors X87State::push() exactly:
+//   newTop = (TOP - 1) & 7
+//   statusWord[13:11] = newTop
+//   tagWord[newTop*2 +: 2] = 0b00   (kValid — clears kEmpty so getSt() works)
+//
+// Why three scratch registers:
+//   Clearing bits at a variable position requires LSLV, which needs the tagWord
+//   value, the shift amount (newTop*2), and the mask (3 << shift) all live
+//   simultaneously. Wd_tmp and Wd_tmp2 serve those roles; Wd_top holds newTop
+//   and is readable by callers on return.
+//
+// On return: Wd_top = newTop. Wd_tmp and Wd_tmp2 are clobbered.
+// =============================================================================
+auto emit_x87_push(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp, int Wd_tmp2) -> void;
+
+// OPT-C: Push without status_word writeback. Caller must ensure writeback
+// before any path that reads status_word (e.g. via pop or explicit store_top).
+auto emit_x87_push_deferred(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp, int Wd_tmp2)
+    -> void;
+
+// =============================================================================
+// 2i — x87 stack pop  (TOP increment)
+//
+// new_TOP = (TOP + 1) & 7, written back into status_word bits [13:11].
+//
+// Emits:
+//   ADD   Wd_top, Wd_top, #1
+//   AND   Wd_top, Wd_top, #7
+//   <emit_store_top>
+//
+// Wd_top is updated in place and holds new TOP on return.
+// Wd_tmp is scratch for the status_word read-modify-write inside emit_store_top.
+// =============================================================================
+
+auto emit_x87_pop(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp, int Wd_tmp2) -> void;
+
+// OPT-C: Pop without status_word writeback. Caller must ensure writeback
+// before any path that reads status_word from memory (x87_flush_top / x87_end).
+auto emit_x87_pop_deferred(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp, int Wd_tmp2)
+    -> void;
+
+// Fused multi-pop: TOP += n with a single status_word RMW.
+auto emit_x87_pop_n(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp, int Wd_tmp2, int n)
+    -> void;
+
+// OPT-C: Fused multi-pop without status_word writeback.
+auto emit_x87_pop_n_deferred(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp, int Wd_tmp2,
+                             int n) -> void;
+
+// OPT-D: Fully-deferred push — only TOP decrement (2 instrs).
+// Skips BOTH store_top AND tag word update.  Caller sets tag_push_pending
+// and top_dirty on x87_cache.  The pending tag must be flushed (or cancelled
+// by a subsequent pop on the same slot) before any code that reads the tag word.
+auto emit_x87_push_fully_deferred(AssemblerBuffer& buf, int Wd_top) -> void;
+
+// OPT-D: Tag-only pop — TOP increment (2 instrs), no tag update, no store_top.
+// Used when a deferred push-tag cancels against the pop's set-empty on the
+// same slot.  Caller must set top_dirty or write store_top.
+auto emit_x87_pop_top_only(AssemblerBuffer& buf, int Wd_top) -> void;
+
+// OPT-D: Emit the tag-valid (kValid = clear 2 bits) update for a deferred push.
+// This is the tag-word portion of emit_x87_push, factored out so it can be
+// emitted lazily when the push-pop cancellation doesn't fire.
+auto emit_x87_tag_clear(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp, int Wd_tmp2)
+    -> void;
+
+// OPT-D2: Batched tag-set-empty for multiple deferred pops.
+//
+// Marks `count` consecutive slots as kEmpty in the tag word with a single
+// LDRH/ORR-chain/STRH.  The slots are (Wd_top - count) & 7 through
+// (Wd_top - 1) & 7 — i.e. the `count` slots most recently popped, assuming
+// Wd_top already holds the post-pop TOP value.
+//
+// Requires 3 scratch GPRs: Wd_tmp, Wd_tmp2, Wd_tagw.  All are clobbered.
+void emit_x87_tag_set_empty_batch(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp,
+                                  int Wd_tmp2, int Wd_tagw, int count);
+
+// Marks `count` consecutive slots as kValid in the tag word with a single
+// LDRH / mask-shift-BIC / STRH sequence (constant cost regardless of count).
+// The slots are Wd_top & 7 through (Wd_top + count - 1) & 7 — i.e. the
+// `count` slots most recently pushed, assuming Wd_top already holds the
+// post-push TOP value.
+//
+// Requires 3 scratch GPRs: Wd_tmp, Wd_tmp2, Wd_tagw.  All are clobbered.
+void emit_x87_tag_set_valid_batch(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp,
+                                  int Wd_tmp2, int Wd_tagw, int count);
+
+// =============================================================================
+// 2j — FCMP result → x87 condition codes in status_word
+//
+// Must be called immediately after emit_fcmp_f64. Reads NZCV via MRS and
+// maps AArch64 flags to x87 C0/C2/C3 bits in status_word:
+//
+//   FCMP outcome    NZCV        C3(b14) C2(b10) C0(b8)
+//   ─────────────── ─────────── ─────── ─────── ──────
+//   ST(0) > src     Z=0,C=0,N=0    0       0      0
+//   ST(0) < src     Z=0,C=1,N=0    0       0      1
+//   ST(0) == src    Z=1,C=1,N=0    1       0      0
+//   Unordered/NaN   Z=1,C=1,V=1    1       1      1
+//
+// Wd_tmp1 and Wd_tmp2 are scratch registers, both clobbered.
+//
+// Note: the most complex Layer 2 function. Safe to defer and keep FCOM
+// as a helper call initially until the rest of Layer 2 is validated.
+// =============================================================================
+
+auto emit_fcom_flags_to_sw(AssemblerBuffer& buf, int Xbase, int Wd_tmp1, int Wd_tmp2) -> void;
+
+// =============================================================================
+// OPT-G: Permutation flush — materialize a non-identity perm map via memory swaps.
+//
+// Uses cycle decomposition to emit the minimal number of swaps.
+// Dd_tmp is a temp FP register for the swap chain.
+// Wd_tmp is scratch for phys_index computation.
+// Hd_save and Hd_chain (native layout, when x87_perm_moves_f80): two more
+// FPRs for bytes 8-9, so the permuted slots move as ten-byte images and
+// keep their formats.  -1 otherwise.
+// =============================================================================
+void emit_x87_perm_flush(AssemblerBuffer& buf, int Xbase, int Wd_top, int Wd_tmp,
+                         const int8_t perm[8], int Xst_base, int Dd_save, int Dd_chain,
+                         int Hd_save = -1, int Hd_chain = -1);
+
+// =============================================================================
+// OPT-L: Branchless FCMP NZCV → packed x87 CC bits.
+//
+// Pre:  NZCV holds the FCMP comparison result.
+//       Wd_save holds the saved host NZCV (from a prior MRS before FCMP).
+// Post: Wd_result = (C0 << 8) | (C2 << 10) | (C3 << 14).
+//       Host NZCV restored from Wd_save. Wd_save freed.
+//       Internally allocates/frees 2 GPRs (Wd_cc, Wd_vs).
+// =============================================================================
+void emit_fcom_cc_pack(AssemblerBuffer& buf, TranslationResult& a1, int Wd_result, int Wd_save);
+
+// =============================================================================
+// OPT-L: RMW status_word — clear C0/C1/C2/C3, OR in packed CC bits, store.
+//
+// Wd_packed = packed CC bits from emit_fcom_cc_pack.
+// Allocates/frees 1 GPR internally for the RMW scratch.
+// =============================================================================
+void emit_fcom_cc_write_sw(AssemblerBuffer& buf, TranslationResult& a1, int Xbase, int Wd_packed);
+
+// =============================================================================
+// Guest EFLAGS in NZCV, as stock Rosetta keeps them at instruction boundaries
+// (its pushf, popf, lahf and sahf translations pack and unpack exactly this):
+//
+//   N = SF   Z = ZF   C = !CF   V = OF   bit 27 = AF   bit 26 = PF
+//
+// Bits 26 and 27 are below the four AArch64 flags.  Apple cores write them on
+// flag-setting instructions and MRS/MSR NZCV read and write them, but no
+// AArch64 condition code tests them, so a PF reader goes through MRS.
+// =============================================================================
+
+inline constexpr int kNzcvPfBit = 26;
+
+// No x87 instruction other than the fcomi family writes EFLAGS, so code
+// that sets NZCV for its own use has to put the guest's flags back.  Where
+// a GPR is free across the span, MRS into it before and MSR from it after.
+// Where none is, park the flags in an FPR: Xtmp only carries them across
+// and is free again after each call.
+void emit_nzcv_park(AssemblerBuffer& buf, int Dpark, int Xtmp);    // MRS; FMOV Dpark, Xtmp
+void emit_nzcv_unpark(AssemblerBuffer& buf, int Dpark, int Xtmp);  // FMOV Xtmp, Dpark; MSR
+
+// FCOMI/FUCOMI flags.  Pre: NZCV holds an FCMP of ST(0) against ST(i).  Post:
+// NZCV holds the guest EFLAGS FCOMI leaves: ZF, PF and CF from the compare,
+// SF, OF and AF clear.  Allocates and frees 3 GPRs.
+void emit_fcomi_nzcv(AssemblerBuffer& buf, TranslationResult& a1);
+
+// FCMOVcc: Dd = cond ? Dtrue : Dfalse, where cond is an AArch64 condition
+// code (the six flag conditions FCMOV uses) or kFcmovCondPF/kFcmovCondNPF.
+// Branches only forward and emits no FCSEL.  The PF forms take one GPR for
+// the MRS.
+void emit_fcmov_select(AssemblerBuffer& buf, TranslationResult& a1, int Dd, int Dtrue, int Dfalse,
+                       int cond);

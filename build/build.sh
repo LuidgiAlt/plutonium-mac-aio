@@ -174,6 +174,24 @@ build_dxvk() {
   ninja -C "$obj" > "$obj.log" 2>&1 || die "ninja failed: see $obj.log"
 }
 
+# build_x87sidecar <obj dir>: x87sidecar (x87sidecar/ in this repo), which
+# patch 0023 starts the games under: only that program, native arm64, with
+# its MIT license next to it. Its source paths are mapped to /x87sidecar,
+# since it keeps its assert messages in release builds.
+build_x87sidecar() {
+  local srcdir=$root/x87sidecar obj=$1 flags
+  flags="-ffile-prefix-map=$srcdir=/x87sidecar -ffile-prefix-map=$obj=/x87sidecar/build"
+  mkdir -p "$obj"
+  (unset CC CXX
+   cmake -S "$srcdir" -B "$obj" -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 \
+     -DCMAKE_C_FLAGS="$flags" -DCMAKE_CXX_FLAGS="$flags" > "$obj/setup.log" 2>&1 &&
+   cmake --build "$obj" --target x87sidecar -j"$jobs" > "$obj/build.log" 2>&1) ||
+    die "x87sidecar build failed: see $obj/build.log"
+  cp "$obj/bin/x87sidecar" "$engine/bin/x87sidecar"
+  mkdir -p "$engine/share/doc/x87sidecar"
+  cp "$srcdir/LICENSE" "$engine/share/doc/x87sidecar/LICENSE"
+}
+
 # finish_engine <deps>: no debug information (it names the builder's
 # folders), the deps rpath (for the build tools only) dropped, every Mach-O
 # file signed; refuses an engine that still names the builder's home.
@@ -196,10 +214,10 @@ finish_engine() {
   fi
 }
 
-# AIO_BUILD_PARTS: any of "wine legacy dxvk tests" (default: all). A partial
+# AIO_BUILD_PARTS: any of "wine legacy dxvk x87 tests" (default: all). A partial
 # build only replaces its own files in the engine.
 build() {
-  local tree obj parts=${AIO_BUILD_PARTS:-wine legacy dxvk tests} part b deps
+  local tree obj parts=${AIO_BUILD_PARTS:-wine legacy dxvk x87 tests} part b deps
   has() { case " $parts " in *" $1 "*) return 0 ;; esac; return 1; }
   wine_env
   # Every path the compilers and makefiles see goes through b (no spaces).
@@ -238,6 +256,10 @@ build() {
     i686-w64-mingw32-strip -o "$engine/lib/wine/i386-windows/d3d9.dll" "$obj/dxvk/src/d3d9/d3d9.dll"
     "$obj/wine/tools/winebuild/winebuild" --builtin "$engine/lib/wine/i386-windows/d3d9.dll" ||
       die "winebuild failed (the wine part builds it)"
+  fi
+  if has x87; then
+    echo "building x87sidecar (log: $obj/x87sidecar/build.log)"
+    build_x87sidecar "$obj/x87sidecar"
   fi
   finish_engine "$deps"
   if has tests; then

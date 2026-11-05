@@ -1,0 +1,218 @@
+Subject: ntdll: start listed 32-bit programs under the x87sidecar
+Date: 2026-11-05
+Applies to: CrossOver 26.3.0 Wine sources, after 0022
+Files changed: dlls/ntdll/unix/loader.c
+Uses: x87sidecar (x87sidecar/ in this repository, MIT, derived from
+  https://github.com/athei/x87sidecar), built by build/build.sh into the
+  engine's bin/.
+
+Rosetta translates x87 floating-point instructions slowly, and BO1 and BO2
+use them in their physics and effects code: under load the game's threads,
+not the GPU, set the frame rate. The x87sidecar hooks Rosetta's translator
+and turns runs of x87 instructions into native ARM64 code.
+
+loader_exec starts a 32-bit program under the sidecar
+(`bin/x87sidecar --cooperative <loader> <args>`) when its file name is in
+WINE_X87_SIDECAR (names separated by ':', any case); launch.sh lists the
+Plutonium bootstrapper, the process both games run in, and nothing else. A
+missing sidecar or a failed exec leaves the normal path. At the top of
+__wine_main the process hands the sidecar its task and thread ports over the
+sidecar's Mach handshake, waits up to 30 s for the reply and invalidates its
+own instruction cache for the code the sidecar patched. Without a reply it
+runs on without the hook. Either way one line on stderr says whether x87
+acceleration is on. It then clears ROSETTA_DISABLE_AOT, which the sidecar sets
+for its process, so that programs it starts keep Rosetta's AOT cache.
+
+Measured with the Plutonium bootstrapper under the sidecar, M1 Pro, 1080p,
+back-to-back matches: BO2 Zombies (Town) lowest second 37 -> 100 FPS, seconds
+under 90 FPS 8 -> 0; BO1 multiplayer average 80 -> 112 FPS, seconds under
+90 FPS 110 -> 8; BO1 campaign average 72 -> 104 FPS, seconds under 60 FPS
+134 -> 2. GPU time per frame unchanged.
+
+Test: tests/src/x87-sidecar-test.c (the test and a child it starts both log
+that acceleration is on; fsin within one unit in the last place).
+Limits: the sidecar's fsin may differ from Rosetta's in the last bit; a
+sidecar that fails after installing its hook ends the program (x87sidecar's
+own design); a sidecar that times out keeps the task port it was given.
+License: LGPL-2.1-or-later, like the Wine file it modifies.
+---
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 494e056..1fe13be 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -69,6 +69,8 @@
+ # include <mach/mach.h>
+ # include <mach/mach_error.h>
+ # include <mach-o/getsect.h>
++# include <servers/bootstrap.h>
++# include <libkern/OSCacheControl.h>
+ # include <crt_externs.h>
+ # ifndef _POSIX_SPAWN_DISABLE_ASLR
+ #  define _POSIX_SPAWN_DISABLE_ASLR 0x0100
+@@ -687,6 +689,146 @@ static void preloader_exec( char **argv, const char *image_path )
+ }
+ 
+ /* exec the appropriate wine loader for the specified machine */
++#if defined(__APPLE__) && defined(__x86_64__)
++
++/* x87sidecar (https://github.com/athei/x87sidecar) speeds up x87 maths under
++ * Rosetta. A program is started under it when its file name is in
++ * WINE_X87_SIDECAR (names separated by ':', any case) and bin/x87sidecar
++ * exists; the sidecar then runs the loader in the same process and waits for
++ * x87_sidecar_handshake. */
++static BOOL x87_sidecar_wanted( const char *image_path )
++{
++    const char *list = getenv( "WINE_X87_SIDECAR" ), *name, *end;
++    size_t len;
++
++    if (!list || !image_path) return FALSE;
++    name = image_path;
++    if ((end = strrchr( name, '\\' ))) name = end + 1;
++    if ((end = strrchr( name, '/' ))) name = end + 1;
++    len = strlen( name );
++    while (*list)
++    {
++        end = strchr( list, ':' );
++        if (!end) end = list + strlen( list );
++        if ((size_t)(end - list) == len && !strncasecmp( list, name, len )) return TRUE;
++        list = *end ? end + 1 : end;
++    }
++    return FALSE;
++}
++
++/* Exec argv[1] (the loader) under the sidecar; returns only when that fails. */
++static void x87_sidecar_exec( char **argv, const char *image_path )
++{
++    char *sidecar, **args;
++    int count = 0;
++
++    if (!bin_dir || !x87_sidecar_wanted( image_path )) return;
++    if (!(sidecar = build_path( bin_dir, "x87sidecar" ))) return;
++    if (access( sidecar, X_OK )) goto done;
++    while (argv[1 + count]) count++;
++    if (!(args = malloc( (count + 3) * sizeof(*args) ))) goto done;
++    if (getenv( "WINEDLLPATH" )) replace_wineloader_path_with_link( &argv[1], image_path );
++    args[0] = sidecar;
++    args[1] = (char *)"--cooperative";
++    memcpy( args + 2, argv + 1, (count + 1) * sizeof(*args) );
++    execv( sidecar, args );
++    free( args );
++done:
++    free( sidecar );
++}
++
++/* The sidecar's handshake (rosetta_loader/src/coop_proto.h in its source):
++ * send our task and thread ports to the service it registered for our pid,
++ * wait for its reply, then flush our instruction cache for the code it
++ * patched. Without a reply the process runs on without the hook. */
++#define X87_SIDECAR_SERVICE  "X87_SIDECAR_BOOTSTRAP"
++#define X87_SIDECAR_MSGH_ID  0x78383721
++#define X87_SIDECAR_TIMEOUT  30000  /* ms */
++
++static void x87_sidecar_handshake(void)
++{
++    struct
++    {
++        mach_msg_header_t header;
++        mach_msg_body_t body;
++        mach_msg_port_descriptor_t task;
++        mach_msg_port_descriptor_t thread;
++    } request;
++    struct
++    {
++        mach_msg_header_t header;
++        UINT64 icache_addr[2];
++        UINT64 icache_len[2];
++        mach_msg_trailer_t trailer;
++    } reply;
++    const char *name = getenv( X87_SIDECAR_SERVICE ), *dot, *error = NULL;
++    mach_port_t bootstrap, service = MACH_PORT_NULL, reply_port = MACH_PORT_NULL;
++    kern_return_t kr;
++    int i;
++
++    /* The name ends with the pid the sidecar started; other processes only
++     * inherited it. */
++    if (!name || !(dot = strrchr( name, '.' )) || atoi( dot + 1 ) != getpid()) return;
++
++    if (task_get_bootstrap_port( mach_task_self(), &bootstrap ) ||
++        bootstrap_look_up( bootstrap, name, &service ))
++    {
++        error = "sidecar service not found";
++        goto done;
++    }
++    mach_port_allocate( mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply_port );
++
++    memset( &request, 0, sizeof(request) );
++    request.header.msgh_bits = MACH_MSGH_BITS( MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE ) |
++                               MACH_MSGH_BITS_COMPLEX;
++    request.header.msgh_size = sizeof(request);
++    request.header.msgh_remote_port = service;
++    request.header.msgh_local_port = reply_port;
++    request.header.msgh_id = X87_SIDECAR_MSGH_ID;
++    request.body.msgh_descriptor_count = 2;
++    request.task.name = mach_task_self();
++    request.task.disposition = MACH_MSG_TYPE_COPY_SEND;
++    request.task.type = MACH_MSG_PORT_DESCRIPTOR;
++    request.thread.name = mach_thread_self();
++    request.thread.disposition = MACH_MSG_TYPE_COPY_SEND;
++    request.thread.type = MACH_MSG_PORT_DESCRIPTOR;
++    if (mach_msg( &request.header, MACH_SEND_MSG, sizeof(request), 0, MACH_PORT_NULL,
++                  MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL ))
++    {
++        error = "handshake not sent";
++        goto done;
++    }
++
++    /* A sidecar that exits without replying makes the kernel send a
++     * MACH_NOTIFY_SEND_ONCE instead. One that hangs runs into the timeout;
++     * it still holds our task port, so a late install stays possible. */
++    memset( &reply, 0, sizeof(reply) );
++    kr = mach_msg( &reply.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(reply), reply_port,
++                   X87_SIDECAR_TIMEOUT, MACH_PORT_NULL );
++    if (kr == MACH_RCV_TIMED_OUT) error = "no reply from the sidecar";
++    else if (kr || reply.header.msgh_id != X87_SIDECAR_MSGH_ID + 1 ||
++             reply.header.msgh_size != offsetof( typeof(reply), trailer ))
++        error = "the sidecar did not install the hook";
++    else
++    {
++        for (i = 0; i < 2; i++)
++            if (reply.icache_len[i])
++                sys_icache_invalidate( (void *)(UINT_PTR)reply.icache_addr[i], reply.icache_len[i] );
++        fprintf( stderr, "wine: x87 acceleration on for this process\n" );
++    }
++
++done:
++    if (reply_port) mach_port_mod_refs( mach_task_self(), reply_port, MACH_PORT_RIGHT_RECEIVE, -1 );
++    if (service) mach_port_deallocate( mach_task_self(), service );
++    if (error) fprintf( stderr, "wine: no x87 acceleration for this process: %s\n", error );
++    /* Rosetta read these at start; programs this one starts must not inherit
++     * them (the sidecar disables Rosetta's AOT cache for its process). */
++    unsetenv( X87_SIDECAR_SERVICE );
++    unsetenv( "ROSETTA_DISABLE_AOT" );
++}
++
++#endif
++
+ static NTSTATUS loader_exec( char **argv, WORD machine, const char *image_path )
+ {
+     static char noexec[] = "WINELOADERNOEXEC=1";
+@@ -696,6 +838,9 @@ static NTSTATUS loader_exec( char **argv, WORD machine, const char *image_path )
+     if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv, image_path );
+ 
+     argv[1] = strdup( wineloader );
++#if defined(__APPLE__) && defined(__x86_64__)
++    if (machine == IMAGE_FILE_MACHINE_I386) x87_sidecar_exec( argv, image_path );
++#endif
+     preloader_exec( argv, image_path );
+     return STATUS_INVALID_IMAGE_FORMAT;
+ }
+@@ -2615,6 +2760,9 @@ DECLSPEC_EXPORT void __wine_main( int argc, char *argv[] )
+     main_argc = argc;
+     main_argv = argv;
+ 
++#if defined(__APPLE__) && defined(__x86_64__)
++    x87_sidecar_handshake();
++#endif
+     init_paths();
+     if (!getenv( "WINELOADERNOEXEC" ) || argc <= 1) check_command_line( argc, argv );
+     unsetenv( "WINELOADERNOEXEC" );

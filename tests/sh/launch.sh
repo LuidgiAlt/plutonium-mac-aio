@@ -16,7 +16,7 @@ mkdir -p "$r"
 (cd "$repo_root" && git ls-files -z | xargs -0 tar -cf - 2>/dev/null) | tar -xf - -C "$r"
 export AIO_NO_DIALOG=1 LAUNCH_DRY_RUN=1
 export AIO_WINE=$repo_root/tests/fixtures/wine-stub.sh AIO_WINESERVER=$repo_root/tests/fixtures/wine-stub.sh
-unset NTDLL XAUDIO MAXFPS LAZY_EXEC SOCKFIX MOUSE_COALESCING HUD WINDOWED FULLSCREEN TWEAKS VERBOSE PLUTONIUM_START
+unset NTDLL XAUDIO MAXFPS LAZY_EXEC SOCKFIX MOUSE_COALESCING X87 HUD WINDOWED FULLSCREEN TWEAKS VERBOSE PLUTONIUM_START
 
 # No runner yet.
 if out=$("$r/launch.sh" 2>&1); then fail "launch without setup succeeded"; fi
@@ -45,6 +45,9 @@ assert_contains "$out" 'reg add HKCU\Environment /v WINE_SOCK_FASTPATH /d 0 /f'
 assert_contains "$out" 'reg delete HKCU\Environment /v WINE_MOUSE_COALESCING /f'
 out=$(MOUSE_COALESCING=1 "$r/launch.sh" 2>&1) || fail "MOUSE_COALESCING=1 launch failed"
 assert_contains "$out" 'reg add HKCU\Environment /v WINE_MOUSE_COALESCING /d 1 /f'
+assert_contains "$out" 'reg add HKCU\Environment /v WINE_X87_SIDECAR /d plutonium-bootstrapper-win32.exe /f'
+out=$(X87=0 "$r/launch.sh" 2>&1) || fail "X87=0 launch failed"
+assert_contains "$out" 'reg delete HKCU\Environment /v WINE_X87_SIDECAR /f'
 
 out=$(PLUTONIUM_START=launcher "$r/launch.sh" 2>&1) || fail "launcher start failed"
 assert_contains "$out" "plutonium-launcher-win32.exe"
@@ -75,6 +78,13 @@ assert_contains "$out" "ntdll.so.legacy is missing"
 # A launcher that stops at once with an error shows the log dialog.
 out=$(LAUNCH_DRY_RUN=0 AIO_STUB_EXIT=3 AIO_PREFIX_RUNNING=0 "$r/launch.sh" 2>&1)
 assert_contains "$out" "Plutonium stopped right away"
+# A game the x87sidecar ended, or one it could not hook, is reported.
+out=$(LAUNCH_DRY_RUN=0 AIO_STUB_EXIT=137 AIO_PREFIX_RUNNING=0 \
+  AIO_STUB_OUTPUT="rosettax87 stub abort kind=0 val=0x10000003 idx=0x00000012" "$r/launch.sh" 2>&1)
+assert_contains "$out" "The x87 acceleration ended the game"
+out=$(LAUNCH_DRY_RUN=0 AIO_PREFIX_RUNNING=0 \
+  AIO_STUB_OUTPUT="wine: no x87 acceleration for this process: no reply from the sidecar" "$r/launch.sh" 2>&1)
+assert_contains "$out" "ran without x87 acceleration"
 
 # selftest runs the Wine tests, the legacy ntdll's breakpoint check, then
 # puts the selected ntdll back.
