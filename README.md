@@ -125,31 +125,56 @@ get them:
 
 ## BO2 campaign
 
-```bash
-GAME=BO2_SP ./launch.sh
-```
+Plutonium's launcher starts BO2 multiplayer and zombies, but has no button
+for BO2's campaign: Treyarch ships it as a separate program (`t6sp.exe`)
+that Plutonium does not handle. `GAME=BO2_SP` starts that program directly,
+with the same engine, renderer and x87 acceleration as the rest.
 
-Plutonium covers BO2's multiplayer and zombies; its launcher has no button
-for the campaign, which Treyarch ships as its own program (`t6sp.exe`).
-(BO1 is different: its zombies run in the campaign's program, so Plutonium's
-BO1 entry has both.) `GAME=BO2_SP` starts that program directly, with the
-same engine, renderer and x87 acceleration.
+### How to
 
-`t6sp.exe` is wrapped in Steam's DRM, which only starts it for a signed-in
-Steam account that owns the game. So the campaign needs:
+1. Install [Steam for Mac](https://store.steampowered.com/about/), open it
+   and sign in with the account that owns Black Ops II.
+2. Have BO2's Windows files on the Mac ([getting the game
+   files](#getting-the-game-files)) and run `./setup.sh` once more: when it
+   finds BO2, it downloads Valve's `steamclient.dll` (one 38 MB package of
+   Steam's Linux client from Valve's servers, checked by SHA-256).
+3. With Steam open:
 
-- **Steam for Mac installed, running and signed in** with the account that
-  owns Black Ops II. This project does not install Steam; get it from
-  [store.steampowered.com](https://store.steampowered.com/about/).
-- **Valve's `steamclient.dll`**, which `./setup.sh` downloads from Valve's
-  servers (one 38 MB package of Steam's Linux client, checked by SHA-256)
-  once BO2 is found.
+   ```bash
+   GAME=BO2_SP ./launch.sh
+   ```
 
-How it works: the engine starts `t6sp.exe` under a small stand-in for
-Steam's Windows client (`steam/steam.c`). The DRM loads Valve's
-`steamclient.dll`, and the engine redirects it (patch 0024) to
-`lsteamclient`, which forwards every call to the Steam app on your Mac, the
-way Proton does on Linux.
+The other options work as usual, e.g. `GAME=BO2_SP MAXFPS=60 ./launch.sh`.
+
+### Limitations
+
+- **Steam must be running and signed in** every time. `t6sp.exe` is wrapped
+  in Steam's DRM, which only starts it for an account that owns the game;
+  this project does not install Steam, nor get around the DRM.
+- **Campaign only.** No Plutonium features (servers, mods, its own fixes) in
+  this mode: it is Treyarch's program as Steam would run it.
+- **No Steam overlay** (Shift+Tab) in the game.
+- Steam may show BO2 as running while the campaign is open, and can refuse
+  to start it a second time until the first one has fully closed.
+
+### Why only BO2_SP
+
+`GAME=` starts a game's own program without Plutonium. For everything else,
+Plutonium is the better and safer way, so there is no `GAME=` for it:
+
+| | Through Plutonium | `GAME=` |
+|---|---|---|
+| BO1 multiplayer | ✅ | ✗ the original multiplayer has known security holes that Plutonium fixes (with its own servers and anti-cheat) |
+| BO1 zombies and campaign | ✅ (BO1's zombies run in the campaign's program, so Plutonium's BO1 entry has both) | ✗ not needed |
+| BO2 multiplayer and zombies | ✅ | ✗ same as BO1 multiplayer: safer on Plutonium |
+| BO2 campaign | ✗ no button in the launcher | ✅ `GAME=BO2_SP` |
+
+### How it works
+
+The engine starts `t6sp.exe` under a small stand-in for Steam's Windows
+client (`steam/steam.c`). The DRM loads Valve's `steamclient.dll`, and the
+engine redirects it (patch 0024) to `lsteamclient`, which forwards every
+call to the Steam app on your Mac, the way Proton does on Linux.
 
 ## Options
 
