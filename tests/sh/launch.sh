@@ -66,14 +66,15 @@ mkdir -p "$r/runner/engine/share/steam" "$w32/x86_64-windows"
 touch "$r/runner/engine/share/steam/steam.exe" "$w32/x86_64-unix/lsteamclient.so"
 if out=$(GAME=BO2_SP "$r/launch.sh" 2>&1); then fail "BO2_SP without steamclient.dll succeeded"; fi
 assert_contains "$out" "needs Valve's steamclient.dll"
-mkdir -p "$r/prefix/drive_c/Program Files (x86)/Steam"
-touch "$r/prefix/drive_c/Program Files (x86)/Steam/steamclient.dll"
+touch "$r/prefix/steamclient.valve.dll"
 if out=$(GAME=BO2_SP "$r/launch.sh" 2>&1); then fail "BO2_SP without Steam for Mac succeeded"; fi
 assert_contains "$out" "needs Steam for Mac"
 touch "$client/steamclient.dylib"
 if out=$(GAME=BO2_SP AIO_STEAM_RUNNING=0 "$r/launch.sh" 2>&1); then fail "BO2_SP without Steam running succeeded"; fi
 assert_contains "$out" "Start Steam and sign in"
 out=$(GAME=BO2_SP "$r/launch.sh" 2>&1) || fail "BO2_SP launch failed: $out"
+rr=$(cd "$r" && pwd)
+assert_contains "$out" "put $rr/prefix/steamclient.valve.dll $rr/prefix/drive_c/Program Files (x86)/Steam/steamclient.dll"
 assert_contains "$out" "/Steam/steam.exe"
 assert_contains "$out" "syswow64/lsteamclient.dll"
 assert_contains "$out" 'reg add HKCU\Environment /v WINE_X87_SIDECAR /d t6sp.exe /f'
@@ -83,6 +84,17 @@ case "$out" in *Plutonium/plutonium.exe*) fail "BO2_SP started Plutonium" ;; esa
 if out=$(GAME=BO2_MP "$r/launch.sh" 2>&1); then fail "GAME=BO2_MP accepted"; fi
 assert_contains "$out" "bad option: GAME=BO2_MP"
 unset BO2_DIR AIO_STEAM_CLIENT AIO_STEAM_RUNNING
+# What the campaign left behind is removed before a Plutonium launch:
+# Plutonium's programs look for Steam and quit when they find it.
+mkdir -p "$r/prefix/drive_c/Program Files (x86)/Steam" "$r/prefix/drive_c/windows/syswow64"
+touch "$r/prefix/drive_c/windows/syswow64/lsteamclient.dll"
+printf '[Software\\\\Valve\\\\Steam\\\\ActiveProcess] 1\n' > "$r/prefix/user.reg"
+out=$("$r/launch.sh" 2>&1) || fail "launch with campaign leftovers failed: $out"
+assert_contains "$out" "rm $rr/prefix/drive_c/Program Files (x86)/Steam $rr/prefix/drive_c/windows/syswow64/lsteamclient.dll"
+assert_contains "$out" 'reg delete HKCU\Software\Valve /f'
+rm -rf "$r/prefix/drive_c/Program Files (x86)/Steam" "$r/prefix/drive_c/windows/syswow64/lsteamclient.dll" "$r/prefix/user.reg"
+out=$("$r/launch.sh" 2>&1) || fail "default launch failed: $out"
+case "$out" in *"rm "*|*"Software\Valve"*) fail "clean prefix: something was removed" ;; esac
 
 # A launch already running (Review Focus 4: two clicks in quick succession).
 mkdir -p "$r/logs/.launch.lock" && echo $$ > "$r/logs/.launch.lock/pid"

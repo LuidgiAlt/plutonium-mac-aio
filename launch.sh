@@ -33,6 +33,7 @@ set_env() { export "$1=$2"; do_reg add 'HKCU\Environment' /v "$1" /d "$2" /f; }
 clear_env() { unset "$1"; do_reg delete 'HKCU\Environment' /v "$1" /f; }
 do_select() { if [ "$dry" = 1 ]; then echo "select $1 $2"; else "runner_select_$1" "$root" "$2"; fi; }
 do_put() { if [ "$dry" = 1 ]; then echo "put $1 $2"; else put "$1" "$2"; fi; }
+do_rm() { if [ "$dry" = 1 ]; then echo "rm $*"; else rm -rf "$@"; fi; }
 
 use_env() {
   aio_env "$root"
@@ -131,27 +132,54 @@ start_target() {
   echo "$plutonium/bin/plutonium-launcher-win32.exe"
 }
 
+# The Steam files and keys GAME=BO2_SP puts in the prefix. Plutonium's
+# programs look for Steam too, and quit when they find this one, so they are
+# removed before every Plutonium launch (and steam_staged lists them).
+steam_staged() {
+  local f
+  for f in "$WINEPREFIX/drive_c/Program Files (x86)/Steam" "$WINEPREFIX/drive_c/windows/system32/lsteamclient.dll" \
+    "$WINEPREFIX/drive_c/windows/syswow64/lsteamclient.dll"; do
+    [ -e "$f" ] && printf '%s\n' "$f"
+  done
+  return 0
+}
+
+steam_clear() {
+  local staged=()
+  while IFS= read -r f; do staged+=("$f"); done < <(steam_staged)
+  [ "${#staged[@]}" -eq 0 ] || do_rm "${staged[@]}"
+  if grep -q '^\[Software\\\\Valve' "$WINEPREFIX/user.reg" 2>/dev/null; then do_reg delete 'HKCU\Software\Valve' /f; fi
+  if grep -q '^\[Software\\\\\(Wow6432Node\\\\\)\{0,1\}Valve' "$WINEPREFIX/system.reg" 2>/dev/null; then
+    do_reg delete 'HKLM\Software\Valve' /f
+    do_reg delete 'HKLM\Software\Wow6432Node\Valve' /f
+  fi
+  return 0
+}
+
 # GAME=BO2_SP: BO2's campaign (t6sp.exe), which Plutonium's launcher does not
 # offer. It is wrapped in Steam's DRM, so it runs under the engine's steam.exe
 # (steam/steam.c) with Valve's steamclient.dll from setup, which the engine
-# redirects to lsteamclient (patch 0024); lsteamclient asks the macOS Steam
-# app, running and signed in to the account that owns BO2. Sets bo2sp_game to
-# the game's folder. AIO_STEAM_RUNNING=0|1 and AIO_STEAM_CLIENT answer for tests.
+# redirects to lsteamclient (patch 0024, only with WINE_STEAM_BRIDGE=1);
+# lsteamclient asks the macOS Steam app, running and signed in to the account
+# that owns BO2. Sets bo2sp_game to the game's folder. AIO_STEAM_RUNNING=0|1
+# and AIO_STEAM_CLIENT answer for tests.
 bo2sp_prepare() {
   local steamdir="$WINEPREFIX/drive_c/Program Files (x86)/Steam" eng=$root/runner/engine game client
   game=$(steam_game_dir bo2) && [ -f "$game/t6sp.exe" ] ||
     stop "BO2's campaign (t6sp.exe) was not found: set BO2_DIR to the game folder (see README)."
   [ -f "$eng/share/steam/steam.exe" ] && [ -f "$eng/lib/wine/x86_64-unix/lsteamclient.so" ] ||
     stop "This engine cannot start the campaign: run ./setup.sh to update it (in $root)."
-  [ -f "$steamdir/steamclient.dll" ] || stop "Run ./setup.sh again (in $root): the campaign needs Valve's steamclient.dll."
+  [ -f "$WINEPREFIX/steamclient.valve.dll" ] || stop "Run ./setup.sh again (in $root): the campaign needs Valve's steamclient.dll."
   client=${AIO_STEAM_CLIENT:-$HOME/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS}
   [ -f "$client/steamclient.dylib" ] || stop "The campaign needs Steam for Mac: install it from store.steampowered.com, sign in, then try again."
   if [ -n "${AIO_STEAM_RUNNING:-}" ]; then [ "$AIO_STEAM_RUNNING" = 1 ]; else pgrep -xq steam_osx; fi ||
     stop "Start Steam and sign in with the account that owns Black Ops II, then try again."
+  [ "$dry" = 1 ] || mkdir -p "$steamdir"
+  do_put "$WINEPREFIX/steamclient.valve.dll" "$steamdir/steamclient.dll"
   do_put "$eng/share/steam/steam.exe" "$steamdir/steam.exe"
   do_put "$eng/lib/wine/x86_64-windows/lsteamclient.dll" "$WINEPREFIX/drive_c/windows/system32/lsteamclient.dll"
   do_put "$eng/lib/wine/i386-windows/lsteamclient.dll" "$WINEPREFIX/drive_c/windows/syswow64/lsteamclient.dll"
-  export SteamAppId=202970 SteamGameId=202970 STEAM_COMPAT_CLIENT_INSTALL_PATH=$client
+  export SteamAppId=202970 SteamGameId=202970 STEAM_COMPAT_CLIENT_INSTALL_PATH=$client WINE_STEAM_BRIDGE=1
   export WINEDLLOVERRIDES="steamclient=n;steamclient64=n;lsteamclient=b"
   if [ "${X87:-1}" = 1 ]; then set_env WINE_X87_SIDECAR t6sp.exe; fi
   bo2sp_game=$game
@@ -231,6 +259,7 @@ if [ "${GAME:-}" = BO2_SP ]; then
   run_logged "${cmd[@]}"
   exit $?
 fi
+steam_clear
 bo1_prepare "$plutonium"
 bo2_prepare "$plutonium"
 if [ "${1:-}" = update ]; then PLUTONIUM_START=updater; fi

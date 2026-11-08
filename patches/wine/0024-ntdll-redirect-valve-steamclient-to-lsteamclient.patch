@@ -13,12 +13,14 @@ lsteamclient, which talks to the macOS Steam app. Valve's imports and entry
 point are never run, the image is made writable and executable (lsteamclient
 keeps its interface tables in its .data), and the header's ImageBase is read
 back from the file, as the DRM compares it. Without lsteamclient.dll the
-module is left as it is. Proton's loader does the same.
+module is left as it is. Only with WINE_STEAM_BRIDGE=1, which launch.sh sets
+for GAME=BO2_SP alone: Plutonium's programs look for Steam as well, and must
+never meet the redirected DLL. Proton's loader does the same.
 
 ---
---- a/dlls/ntdll/loader.c	2026-11-08 09:31:49
-+++ b/dlls/ntdll/loader.c	2026-11-08 09:41:50
-@@ -2271,8 +2271,104 @@
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -2271,7 +2271,111 @@
  #endif
  #ifdef __x86_64__
  static void apply_fuzzy_binary_patches( WINE_MODREF* wm );
@@ -51,8 +53,16 @@ module is left as it is. Proton's loader does the same.
 +    SIZE_T prot_size;
 +    void *prot_base;
 +    ULONG old;
++    UNICODE_STRING env = RTL_CONSTANT_STRING( L"WINE_STEAM_BRIDGE" ), value;
++    WCHAR on[2];
 +
 +    if (!wm->ldr.BaseDllName.Buffer || wcsicmp( wm->ldr.BaseDllName.Buffer, client )) return FALSE;
++    /* Only where asked for: other programs (Plutonium) look for Steam too. */
++    value.Buffer = on;
++    value.MaximumLength = sizeof(on);
++    value.Length = 0;
++    if (RtlQueryEnvironmentVariable_U( NULL, &env, &value ) || value.Length != sizeof(WCHAR) || on[0] != '1')
++        return FALSE;
 +    if (LdrLoadDll( NULL, 0, &lname, &handle ))
 +    {
 +        WARN( "%s without lsteamclient.dll: left as is\n", debugstr_w(client) );
@@ -118,21 +128,20 @@ module is left as it is. Proton's loader does the same.
 +    TRACE( "%s redirected to lsteamclient.dll\n", debugstr_w(client) );
 +    return TRUE;
 +}
- 
 +
+ 
  /*************************************************************************
   *		build_module
-  *
-@@ -2310,6 +2406,12 @@
+@@ -2309,6 +2413,12 @@
+     wm->system = system;
  
      update_load_config( *module );
- 
++
 +    if (!is_builtin && steamclient_redirect( wm, nt_name, nt ))
 +    {
 +        wm->ldr.Flags |= LDR_DONT_RESOLVE_REFS;
 +        flags |= DONT_RESOLVE_DLL_REFERENCES;
 +    }
-+
+ 
      /* fixup imports */
  
-     if (!(flags & DONT_RESOLVE_DLL_REFERENCES) &&

@@ -183,17 +183,19 @@ step_plutonium() {
 # Valve's Windows steamclient.dll for GAME=BO2_SP (see launch.sh): the
 # campaign's DRM loads it and the engine redirects it to the macOS Steam app.
 # It comes from a package of Valve's Linux Steam client (manifest.txt); this
-# installs no Steam. Only when BO2 is there; a later run adds it otherwise.
+# installs no Steam. Kept outside drive_c: launch.sh puts it in place for the
+# campaign only (Plutonium looks for Steam too). Only when BO2 is there; a
+# later run adds it otherwise.
 steamclient_sha=e9e961c914a418b6a3c597822bdc920bdea62c842ff42de23dc306331da563f8
 step_steam() {
-  local dst="$root/prefix/drive_c/Program Files (x86)/Steam/steamclient.dll" bo2 url sha tmp
+  local dst=$root/prefix/steamclient.valve.dll bo2 url sha tmp
   if [ -f "$dst" ] && [ "$(sha256_of "$dst")" = "$steamclient_sha" ]; then skip steam; return; fi
   if ! bo2=$(steam_game_dir bo2) || [ ! -f "$bo2/t6sp.exe" ]; then
     log_info "steam: BO2's campaign not found; run setup again once it is (or set BO2_DIR)"
     return
   fi
   read -r url sha < <(manifest_get steam-bins-misc.zip) || die "manifest.txt has no steam-bins-misc.zip"
-  mkdir -p "$downloads" "$(dirname "$dst")"
+  mkdir -p "$downloads"
   log_info "downloading Valve's steamclient.dll for BO2's campaign (GAME=BO2_SP)"
   fetch "$url" "$downloads/steam-bins-misc.zip" "$sha" || die "download of steam-bins-misc.zip failed: $url"
   tmp=$(mktemp "$dst.XXXXXX")
