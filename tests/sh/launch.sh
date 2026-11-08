@@ -16,7 +16,7 @@ mkdir -p "$r"
 (cd "$repo_root" && git ls-files -z | xargs -0 tar -cf - 2>/dev/null) | tar -xf - -C "$r"
 export AIO_NO_DIALOG=1 LAUNCH_DRY_RUN=1
 export AIO_WINE=$repo_root/tests/fixtures/wine-stub.sh AIO_WINESERVER=$repo_root/tests/fixtures/wine-stub.sh
-unset NTDLL XAUDIO MAXFPS LAZY_EXEC SOCKFIX MOUSE_COALESCING X87 HUD WINDOWED FULLSCREEN TWEAKS VERBOSE PLUTONIUM_START
+unset NTDLL XAUDIO MAXFPS LAZY_EXEC SOCKFIX MOUSE_COALESCING X87 HUD WINDOWED FULLSCREEN TWEAKS VERBOSE PLUTONIUM_START GAME
 
 # No runner yet.
 if out=$("$r/launch.sh" 2>&1); then fail "launch without setup succeeded"; fi
@@ -55,6 +55,34 @@ assert_contains "$out" "plutonium-launcher-win32.exe"
 if out=$(NTDLL=foo "$r/launch.sh" 2>&1); then fail "NTDLL=foo accepted"; fi
 assert_contains "$out" "bad option: NTDLL=foo"
 case "$out" in *select*|*"reg add"*) fail "actions ran before the options were checked" ;; esac
+
+# GAME=BO2_SP: the campaign under steam.exe, checked step by step.
+g="$tmp/BO2 game"; mkdir -p "$g"; touch "$g/t6sp.exe"
+client="$tmp/Steam client"; mkdir -p "$client"
+export BO2_DIR=$g AIO_STEAM_CLIENT=$client AIO_STEAM_RUNNING=1
+if out=$(GAME=BO2_SP "$r/launch.sh" 2>&1); then fail "BO2_SP without the engine's steam.exe succeeded"; fi
+assert_contains "$out" "This engine cannot start the campaign"
+mkdir -p "$r/runner/engine/share/steam" "$w32/x86_64-windows"
+touch "$r/runner/engine/share/steam/steam.exe" "$w32/x86_64-unix/lsteamclient.so"
+if out=$(GAME=BO2_SP "$r/launch.sh" 2>&1); then fail "BO2_SP without steamclient.dll succeeded"; fi
+assert_contains "$out" "needs Valve's steamclient.dll"
+mkdir -p "$r/prefix/drive_c/Program Files (x86)/Steam"
+touch "$r/prefix/drive_c/Program Files (x86)/Steam/steamclient.dll"
+if out=$(GAME=BO2_SP "$r/launch.sh" 2>&1); then fail "BO2_SP without Steam for Mac succeeded"; fi
+assert_contains "$out" "needs Steam for Mac"
+touch "$client/steamclient.dylib"
+if out=$(GAME=BO2_SP AIO_STEAM_RUNNING=0 "$r/launch.sh" 2>&1); then fail "BO2_SP without Steam running succeeded"; fi
+assert_contains "$out" "Start Steam and sign in"
+out=$(GAME=BO2_SP "$r/launch.sh" 2>&1) || fail "BO2_SP launch failed: $out"
+assert_contains "$out" "/Steam/steam.exe"
+assert_contains "$out" "syswow64/lsteamclient.dll"
+assert_contains "$out" 'reg add HKCU\Environment /v WINE_X87_SIDECAR /d t6sp.exe /f'
+assert_contains "$out" 'exec '
+assert_contains "$out" '\t6sp.exe'
+case "$out" in *Plutonium/plutonium.exe*) fail "BO2_SP started Plutonium" ;; esac
+if out=$(GAME=BO2_MP "$r/launch.sh" 2>&1); then fail "GAME=BO2_MP accepted"; fi
+assert_contains "$out" "bad option: GAME=BO2_MP"
+unset BO2_DIR AIO_STEAM_CLIENT AIO_STEAM_RUNNING
 
 # A launch already running (Review Focus 4: two clicks in quick succession).
 mkdir -p "$r/logs/.launch.lock" && echo $$ > "$r/logs/.launch.lock/pid"

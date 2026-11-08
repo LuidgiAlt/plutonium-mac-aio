@@ -5,6 +5,7 @@
 #   ./launch.sh update     run Plutonium's updater only
 #   ./launch.sh log        open the last run's log
 #   ./launch.sh selftest   check this installation without a game
+#   GAME=BO2_SP ./launch.sh  BO2's campaign, which Plutonium does not start
 # Options (environment variables) are listed in README.md.
 set -u
 root=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -16,6 +17,8 @@ root=$(cd -- "$(dirname -- "$0")" && pwd)
 . "$root/lib/options.sh"
 # shellcheck source=lib/games.sh
 . "$root/lib/games.sh"
+# shellcheck source=lib/steam.sh
+. "$root/lib/steam.sh"
 
 plutonium=$root/prefix/drive_c/users/crossover/AppData/Local/Plutonium
 logs=$root/logs
@@ -128,6 +131,32 @@ start_target() {
   echo "$plutonium/bin/plutonium-launcher-win32.exe"
 }
 
+# GAME=BO2_SP: BO2's campaign (t6sp.exe), which Plutonium's launcher does not
+# offer. It is wrapped in Steam's DRM, so it runs under the engine's steam.exe
+# (steam/steam.c) with Valve's steamclient.dll from setup, which the engine
+# redirects to lsteamclient (patch 0024); lsteamclient asks the macOS Steam
+# app, running and signed in to the account that owns BO2. Sets bo2sp_game to
+# the game's folder. AIO_STEAM_RUNNING=0|1 and AIO_STEAM_CLIENT answer for tests.
+bo2sp_prepare() {
+  local steamdir="$WINEPREFIX/drive_c/Program Files (x86)/Steam" eng=$root/runner/engine game client
+  game=$(steam_game_dir bo2) && [ -f "$game/t6sp.exe" ] ||
+    stop "BO2's campaign (t6sp.exe) was not found: set BO2_DIR to the game folder (see README)."
+  [ -f "$eng/share/steam/steam.exe" ] && [ -f "$eng/lib/wine/x86_64-unix/lsteamclient.so" ] ||
+    stop "This engine cannot start the campaign: run ./setup.sh to update it (in $root)."
+  [ -f "$steamdir/steamclient.dll" ] || stop "Run ./setup.sh again (in $root): the campaign needs Valve's steamclient.dll."
+  client=${AIO_STEAM_CLIENT:-$HOME/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS}
+  [ -f "$client/steamclient.dylib" ] || stop "The campaign needs Steam for Mac: install it from store.steampowered.com, sign in, then try again."
+  if [ -n "${AIO_STEAM_RUNNING:-}" ]; then [ "$AIO_STEAM_RUNNING" = 1 ]; else pgrep -xq steam_osx; fi ||
+    stop "Start Steam and sign in with the account that owns Black Ops II, then try again."
+  do_put "$eng/share/steam/steam.exe" "$steamdir/steam.exe"
+  do_put "$eng/lib/wine/x86_64-windows/lsteamclient.dll" "$WINEPREFIX/drive_c/windows/system32/lsteamclient.dll"
+  do_put "$eng/lib/wine/i386-windows/lsteamclient.dll" "$WINEPREFIX/drive_c/windows/syswow64/lsteamclient.dll"
+  export SteamAppId=202970 SteamGameId=202970 STEAM_COMPAT_CLIENT_INSTALL_PATH=$client
+  export WINEDLLOVERRIDES="steamclient=n;steamclient64=n;lsteamclient=b"
+  if [ "${X87:-1}" = 1 ]; then set_env WINE_X87_SIDECAR t6sp.exe; fi
+  bo2sp_game=$game
+}
+
 # x87_check <log>: say when the x87sidecar ended the game or could not hook
 # Rosetta, and how to play without it.
 x87_check() {
@@ -194,6 +223,14 @@ if [ "$dry" != 1 ]; then
 fi
 export AIO_LOG=$logs/launch.log
 apply_switches
+if [ "${GAME:-}" = BO2_SP ]; then
+  bo2sp_prepare
+  [ "$dry" = 1 ] || cd "$bo2sp_game" || stop "Cannot open $bo2sp_game."
+  cmd=("$WINE" "C:\\Program Files (x86)\\Steam\\steam.exe" "Z:${bo2sp_game//\//\\}\\t6sp.exe")
+  if [ "$dry" = 1 ]; then echo "exec ${cmd[*]}"; exit 0; fi
+  run_logged "${cmd[@]}"
+  exit $?
+fi
 bo1_prepare "$plutonium"
 bo2_prepare "$plutonium"
 if [ "${1:-}" = update ]; then PLUTONIUM_START=updater; fi

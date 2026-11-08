@@ -38,7 +38,10 @@ nothing else on your Mac is touched: not Steam, not your game files.
 | Game | Multiplayer | Zombies | Campaign | Renderer |
 |---|:---:|:---:|:---:|---|
 | **Black Ops** (T5) | ✅ | ✅ | ✅ | DXVK on MoltenVK |
-| **Black Ops II** (T6) | ✅ | ✅ | ✅ | [DXMT](https://github.com/3Shain/dxmt) (Metal) |
+| **Black Ops II** (T6) | ✅ | ✅ | ✅ ¹ | [DXMT](https://github.com/3Shain/dxmt) (Metal) |
+
+¹ Plutonium's launcher has no BO2 campaign: it runs with
+`GAME=BO2_SP ./launch.sh` and needs the Steam app ([BO2 campaign](#bo2-campaign)).
 
 Online and offline play, keyboard and mouse (500–1000 Hz mice included) and
 controllers ([see below](#controllers)). Tested on an M1 Pro.
@@ -63,7 +66,8 @@ BO1's campaign sound, choppy before, is clean with it.
 
 - A Mac with Apple Silicon (M1 or later) and Rosetta 2:
   `softwareupdate --install-rosetta`
-- **Black Ops** and/or **Black Ops II** installed through Steam
+- **Black Ops** and/or **Black Ops II** on Steam, with the Windows game
+  files on this Mac ([getting the game files](#getting-the-game-files))
 - A [Plutonium](https://plutonium.pw) account
 
 ## Quick start
@@ -95,6 +99,58 @@ Terminal.
 > Running `./setup.sh` again resumes or repairs a setup.
 > `./setup.sh uninstall` removes everything setup made.
 
+### Getting the game files
+
+Both games are Windows-only, and the Steam app for Mac does not install
+Windows games. Setup looks for them in Steam's library folders; anywhere
+else, point it at them with `BO1_DIR=...` / `BO2_DIR=...`
+(`BO2_DIR="$HOME/Games/Call of Duty Black Ops II" ./setup.sh`). Two ways to
+get them:
+
+- **SteamCMD**, Valve's command-line Steam client, downloads the Windows
+  version of games you own:
+
+  ```bash
+  mkdir -p ~/steamcmd && cd ~/steamcmd
+  curl -sqL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_osx.tar.gz | tar zxf -
+  ./steamcmd.sh +@sSteamCmdForcePlatformType windows \
+    +force_install_dir "$HOME/Games/Call of Duty Black Ops II" \
+    +login YOUR_STEAM_NAME +app_update 202970 validate +app_update 202990 validate \
+    +app_update 212910 validate +quit
+  ```
+
+  For Black Ops: `+force_install_dir "$HOME/Games/Call of Duty Black Ops"`
+  and apps `42700` and `42710`.
+- **Copy the folders** from a Windows PC with Steam.
+
+## BO2 campaign
+
+```bash
+GAME=BO2_SP ./launch.sh
+```
+
+Plutonium covers BO2's multiplayer and zombies; its launcher has no button
+for the campaign, which Treyarch ships as its own program (`t6sp.exe`).
+(BO1 is different: its zombies run in the campaign's program, so Plutonium's
+BO1 entry has both.) `GAME=BO2_SP` starts that program directly, with the
+same engine, renderer and x87 acceleration.
+
+`t6sp.exe` is wrapped in Steam's DRM, which only starts it for a signed-in
+Steam account that owns the game. So the campaign needs:
+
+- **Steam for Mac installed, running and signed in** with the account that
+  owns Black Ops II. This project does not install Steam; get it from
+  [store.steampowered.com](https://store.steampowered.com/about/).
+- **Valve's `steamclient.dll`**, which `./setup.sh` downloads from Valve's
+  servers (one 38 MB package of Steam's Linux client, checked by SHA-256)
+  once BO2 is found.
+
+How it works: the engine starts `t6sp.exe` under a small stand-in for
+Steam's Windows client (`steam/steam.c`). The DRM loads Valve's
+`steamclient.dll`, and the engine redirects it (patch 0024) to
+`lsteamclient`, which forwards every call to the Steam app on your Mac, the
+way Proton does on Linux.
+
 ## Options
 
 Options go before the command, e.g. `HUD=1 MAXFPS=120 ./launch.sh`.
@@ -105,6 +161,7 @@ Options go before the command, e.g. `HUD=1 MAXFPS=120 ./launch.sh`.
 | `MAXFPS=<n>` | Cap the frame rate of both games, e.g. `MAXFPS=60` ([frame pacing](#smoother-motion-with-maxfps)) |
 | `WINDOWED=1` / `FULLSCREEN=1` | Display mode for both games (BO2's own options win) |
 | `TWEAKS=0` | Keep BO1's blur, distortion and frame cap (off by default for speed) |
+| `GAME=BO2_SP` | BO2's campaign ([BO2 campaign](#bo2-campaign)) |
 | `X87=0` | Turn the x87 acceleration off |
 | `MOUSE_COALESCING=1` | macOS's batching of mouse moves, one batch per display refresh (off by default since engine 0.2.1, so every report from a 500–1000 Hz mouse reaches the game) |
 | `XAUDIO=builtin` | Wine's XAudio2 instead of Microsoft's (BO1 gunfire is then silent) |
@@ -167,6 +224,8 @@ branch.
 | "Plutonium stopped right away" | Read the log shown; try `VERBOSE=1 ./launch.sh`. |
 | Hangs at "Loading fastfile" | `NTDLL=legacy ./launch.sh` |
 | BO2 crashes on start | Usually a BO2 profile asking for 8x MSAA ([known issues](#known-issues)). |
+| "Start Steam and sign in" (`GAME=BO2_SP`) | Open the Steam app, sign in with the account that owns BO2, try again. |
+| "Application load error" (`GAME=BO2_SP`) | Steam's DRM refused: Steam not signed in, or the account does not own BO2. |
 | Stutter in the first half-minute | Shaders are being compiled and cached; wait in the menu, it gets better as you play. |
 | A crash or glitch that goes away with `X87=0` | Play with `X87=0 ./launch.sh` and please [open an issue](https://github.com/LuidgiAlt/plutonium-mac-aio/issues) with the log. |
 | "build failed" (`BUILD=1`) | Read the log it names; check the tools in [Building from source](#building-from-source). |
@@ -239,6 +298,7 @@ This repository's build (`x87sidecar/`) is a reduced and hardened version of
 | wine 0021 | Empty socket receives answered without wineserver (online stutter) |
 | wine 0022 | Every mouse report reaches the game instead of one batch per display refresh (high-rate mice) |
 | wine 0023 | The games' process starts under x87sidecar: faster x87 maths (heavy-moment frame drops) |
+| wine 0024–0025 | Valve's `steamclient.dll` redirected to `lsteamclient`, which talks to the Steam app (BO2 campaign) |
 | wine 0003, 0005–0019 | wined3d's Vulkan renderer for Direct3D 9 (BO1 uses DXVK) |
 | dxvk 0001–0003 | DXVK 1.10.3 on MoltenVK 1.4.2 for BO1 |
 
@@ -276,6 +336,14 @@ BUILD=1 ./setup.sh
   `x87sidecar/`, derived from https://github.com/athei/x87sidecar 1.9.1. Its
   license is in [`x87sidecar/LICENSE`](x87sidecar/LICENSE) and
   `share/doc/x87sidecar/LICENSE`.
+- **lsteamclient** inside the engine: Proton's (Valve), fetched by
+  `build/build.sh` at the commit `manifest.txt` pins, with this project's
+  macOS files in `steam/lsteamclient/`; Proton's sources stay out of this
+  repository (Steamworks SDK license, `steam/lsteamclient/LICENSE`).
+- **`steam/steam.c`** (the stand-in `steam.exe`): GPL-3.0-or-later, this
+  project.
+- **Valve's `steamclient.dll`** for the BO2 campaign is downloaded by setup
+  from Valve's servers; it is not part of this repository or its release.
 - **Sikarugir's wrapper template, DXMT and Plutonium** are downloaded by
   setup from their own releases; they are not part of this repository or its
   release.

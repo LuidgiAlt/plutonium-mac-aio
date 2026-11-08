@@ -1,0 +1,138 @@
+Subject: ntdll: redirect Valve's steamclient.dll to lsteamclient.dll
+Date: 2026-11-08
+Applies to: CrossOver 26.3.0 Wine sources, after 0023
+Files changed: dlls/ntdll/loader.c
+
+The BO2 campaign (t6sp.exe, GAME=BO2_SP) is wrapped in Steam's DRM. The
+wrapper loads the steamclient.dll that the ActiveProcess registry key names
+and checks that it is Valve's: a stand-in with the same exports is refused
+("Application load error 3:0000065432"). So Valve's DLL is loaded, but when
+the loader maps steamclient.dll (steamclient64.dll in a 64-bit process) it
+also loads lsteamclient.dll and makes every export the two share jump into
+lsteamclient, which talks to the macOS Steam app. Valve's imports and entry
+point are never run, the image is made writable and executable (lsteamclient
+keeps its interface tables in its .data), and the header's ImageBase is read
+back from the file, as the DRM compares it. Without lsteamclient.dll the
+module is left as it is. Proton's loader does the same.
+
+---
+--- a/dlls/ntdll/loader.c	2026-11-08 09:31:49
++++ b/dlls/ntdll/loader.c	2026-11-08 09:41:50
+@@ -2271,8 +2271,104 @@
+ #endif
+ #ifdef __x86_64__
+ static void apply_fuzzy_binary_patches( WINE_MODREF* wm );
++#endif
++
++/* The Steam bridge (GAME=BO2_SP in the AIO). Games and their Steam DRM load
++ * Valve's steamclient.dll (steamclient64.dll in 64-bit processes) and check the
++ * module and its file, so Valve's DLL stays mapped; but every export that
++ * lsteamclient.dll also has jumps into lsteamclient, which talks to the macOS
++ * Steam client. Valve's entry point and imports are never run, as in
++ * Proton's loader. */
++static BOOL steamclient_redirect( WINE_MODREF *wm, const UNICODE_STRING *nt_name, IMAGE_NT_HEADERS *nt )
++{
++#ifdef _WIN64
++    static const WCHAR client[] = L"steamclient64.dll";
++#else
++    static const WCHAR client[] = L"steamclient.dll";
++#endif
++    UNICODE_STRING lname = RTL_CONSTANT_STRING( L"lsteamclient.dll" );
++    const IMAGE_EXPORT_DIRECTORY *exports, *lexports;
++    const DWORD *names, *funcs, *lnames, *lfuncs;
++    const WORD *ords, *lords;
++    BYTE *module = wm->ldr.DllBase, *lsteam;
++    OBJECT_ATTRIBUTES attr;
++    IO_STATUS_BLOCK io;
++    LARGE_INTEGER offset;
++    HMODULE handle;
++    HANDLE file;
++    DWORD size, i, j;
++    SIZE_T prot_size;
++    void *prot_base;
++    ULONG old;
++
++    if (!wm->ldr.BaseDllName.Buffer || wcsicmp( wm->ldr.BaseDllName.Buffer, client )) return FALSE;
++    if (LdrLoadDll( NULL, 0, &lname, &handle ))
++    {
++        WARN( "%s without lsteamclient.dll: left as is\n", debugstr_w(client) );
++        return FALSE;
++    }
++    lsteam = (BYTE *)handle;
++    if (!(exports = RtlImageDirectoryEntryToData( (HMODULE)module, TRUE, IMAGE_DIRECTORY_ENTRY_EXPORT, &size )) ||
++        !(lexports = RtlImageDirectoryEntryToData( (HMODULE)lsteam, TRUE, IMAGE_DIRECTORY_ENTRY_EXPORT, &size )))
++        return FALSE;
++
++    /* lsteamclient also keeps the interface tables it hands out in this
++     * module's .data, and the jumps below go into its code. */
++    prot_base = module;
++    prot_size = nt->OptionalHeader.SizeOfImage;
++    if (NtProtectVirtualMemory( NtCurrentProcess(), &prot_base, &prot_size, PAGE_EXECUTE_READWRITE, &old ))
++        return FALSE;
++
++    names = get_rva( (HMODULE)module, exports->AddressOfNames );
++    funcs = get_rva( (HMODULE)module, exports->AddressOfFunctions );
++    ords = get_rva( (HMODULE)module, exports->AddressOfNameOrdinals );
++    lnames = get_rva( (HMODULE)lsteam, lexports->AddressOfNames );
++    lfuncs = get_rva( (HMODULE)lsteam, lexports->AddressOfFunctions );
++    lords = get_rva( (HMODULE)lsteam, lexports->AddressOfNameOrdinals );
++    for (i = 0; i < exports->NumberOfNames; i++)
++    {
++        const char *name = get_rva( (HMODULE)module, names[i] );
++        BYTE *code = get_rva( (HMODULE)module, funcs[ords[i]] );
++        void *target = NULL;
++
++        for (j = 0; j < lexports->NumberOfNames && !target; j++)
++            if (!strcmp( name, get_rva( (HMODULE)lsteam, lnames[j] ))) target = get_rva( (HMODULE)lsteam, lfuncs[lords[j]] );
++        if (!target) continue;
++#ifdef _WIN64
++        code[0] = 0x48; code[1] = 0xb8; memcpy( code + 2, &target, 8 );  /* movabs rax, target */
++        code[10] = 0xff; code[11] = 0xe0;                                /* jmp rax */
++#else
++        code[0] = 0xb8; memcpy( code + 1, &target, 4 );                  /* mov eax, target */
++        code[5] = 0xff; code[6] = 0xe0;                                  /* jmp eax */
++#endif
++    }
++    if (nt->OptionalHeader.AddressOfEntryPoint)
++    {
++        BYTE *entry = get_rva( (HMODULE)module, nt->OptionalHeader.AddressOfEntryPoint );
++#ifdef _WIN64
++        static const BYTE ret_true[] = { 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3 };  /* mov eax, 1; ret */
++#else
++        static const BYTE ret_true[] = { 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc2, 0x0c, 0x00 };  /* mov eax, 1; ret 12 */
+ #endif
++        memcpy( entry, ret_true, sizeof(ret_true) );
++    }
++
++    /* The header holds the address the module was mapped at; put back the
++     * file's, which is what the DRM compares against. */
++    InitializeObjectAttributes( &attr, (UNICODE_STRING *)nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
++    if (!NtOpenFile( &file, GENERIC_READ | SYNCHRONIZE, &attr, &io, FILE_SHARE_READ | FILE_SHARE_DELETE,
++                     FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE ))
++    {
++        offset.QuadPart = (BYTE *)&nt->OptionalHeader.ImageBase - module;
++        NtReadFile( file, 0, NULL, NULL, &io, &nt->OptionalHeader.ImageBase,
++                    sizeof(nt->OptionalHeader.ImageBase), &offset, NULL );
++        NtClose( file );
++    }
++    TRACE( "%s redirected to lsteamclient.dll\n", debugstr_w(client) );
++    return TRUE;
++}
+ 
++
+ /*************************************************************************
+  *		build_module
+  *
+@@ -2310,6 +2406,12 @@
+ 
+     update_load_config( *module );
+ 
++    if (!is_builtin && steamclient_redirect( wm, nt_name, nt ))
++    {
++        wm->ldr.Flags |= LDR_DONT_RESOLVE_REFS;
++        flags |= DONT_RESOLVE_DLL_REFERENCES;
++    }
++
+     /* fixup imports */
+ 
+     if (!(flags & DONT_RESOLVE_DLL_REFERENCES) &&

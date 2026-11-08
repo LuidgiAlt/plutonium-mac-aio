@@ -192,6 +192,85 @@ build_x87sidecar() {
   cp "$srcdir/LICENSE" "$engine/share/doc/x87sidecar/LICENSE"
 }
 
+# lsteamclient_sources <wine tree>: dlls/lsteamclient, which patch 0025
+# declares: Proton's lsteamclient at the commit manifest.txt pins, checked by a
+# digest over its files (GitHub regenerates the archive, so the archive's own
+# hash moves), with the macOS files of steam/lsteamclient/ over it. Proton's
+# files are fetched, not kept in this repository (Steamworks SDK license).
+lsteamclient_sources() {
+  local dst=$1/dlls/lsteamclient name=proton-lsteamclient.tar.gz url digest base=$root/build/lsteamclient-src f
+  read -r url digest < <(manifest_get "$name") || die "manifest.txt has no $name"
+  mkdir -p "$downloads"
+  fetch "$url" "$downloads/$name" - || die "download of $name failed: $url"
+  if [ "$(cat "$base.url" 2>/dev/null)" != "$url" ]; then
+    rm -rf "$base" && mkdir -p "$base"
+    tar -xzf "$downloads/$name" -C "$base" --strip-components 2 '*/lsteamclient/' || die "$name is damaged"
+    echo "$url" > "$base.url"
+  fi
+  [ "$(tree_digest "$base")" = "$digest" ] || die "Proton's lsteamclient is not the one manifest.txt pins (rm -rf $base and retry)"
+  rm -rf "$dst" && cp -R "$base" "$dst"
+  for f in steamclient_main.c unix_steam_input_manual.cpp unixlib.cpp; do
+    [ -f "$dst/$f" ] || die "steam/lsteamclient/$f replaces nothing in Proton's lsteamclient"
+    cp "$root/steam/lsteamclient/$f" "$dst/$f"
+  done
+  # Wine's make gets the Windows half only (the .c sources): this makedep
+  # does not read "#pragma makedep unix" in C++ files and would compile them
+  # as Windows code. build_lsteamclient_unix builds the C++ half.
+  awk '/^UNIXLIB/ { next }
+       /^SOURCES/ { src = 1; printf "SOURCES ="; next }
+       src && /\.c[[:space:]]*\\?[[:space:]]*$/ { gsub(/[[:space:]\\]/, ""); printf " \\\n\t%s", $0; next }
+       src { next }
+       { print }
+       END { print "" }' "$base/Makefile.in" > "$dst/Makefile.in"
+}
+
+# tree_digest <dir>: SHA-256 over each file's path and contents, in path order.
+tree_digest() {
+  (cd "$1" && python3 -I -c '
+import hashlib, pathlib
+h = hashlib.sha256()
+for p in sorted(q for q in pathlib.Path(".").rglob("*") if q.is_file()):
+    h.update(hashlib.sha256(str(p).encode()).digest())
+    h.update(hashlib.sha256(p.read_bytes()).digest())
+print(h.hexdigest())')
+}
+
+# build_lsteamclient_unix <wine tree> <obj dir>: lsteamclient.so, the half
+# that runs in the Wine loader's process and loads the macOS Steam client's
+# steamclient.dylib. Built here rather than by Wine's make, which links C++
+# unix libraries for the build machine (arm64) and leaves an empty stub.
+build_lsteamclient_unix() {
+  local srcdir=$1/dlls/lsteamclient obj=$2 out=$2/dlls/lsteamclient/lsteamclient-aio.so cpp o objs=()
+  local list=$root/build/lsteamclient-src/Makefile.in
+  # cwchar and cstring first: Wine's winbase.h turns wcsncpy and strncpy into
+  # errors, which the SDK's C++ headers would otherwise trip over.
+  local flags=(-arch x86_64 -O2 -fPIC -fasynchronous-unwind-tables "-ffile-prefix-map=$b=/build" -include cwchar -include cstring
+    -I"$obj/dlls/lsteamclient" -I"$srcdir" -I"$obj/include" -I"$1/include"
+    -D__WINESRC__ -DSTEAM_API_EXPORTS -Dprivate=public -Dprotected=public -DWINE_UNIX_LIB)
+  for cpp in $(sed -n 's/^[[:space:]]*\([A-Za-z0-9_]*\.cpp\)[[:space:]]*\\*[[:space:]]*$/\1/p' "$list"); do
+    o=$obj/dlls/lsteamclient/aio-${cpp%.cpp}.o
+    if [ ! -f "$o" ] || [ "$srcdir/$cpp" -nt "$o" ]; then
+      clang++ "${flags[@]}" -c -o "$o" "$srcdir/$cpp" >> "$obj/dlls/lsteamclient/aio-build.log" 2>&1 ||
+        die "lsteamclient.so: $cpp failed: see $obj/dlls/lsteamclient/aio-build.log"
+    fi
+    objs+=("$o")
+  done
+  [ "${#objs[@]}" -gt 0 ] || die "no C++ sources in $list"
+  clang -arch x86_64 -dynamiclib -o "$out" -install_name @rpath/lsteamclient.so \
+    "${objs[@]}" "$obj/dlls/ntdll/ntdll.so" -lc++ -Wl,-undefined,dynamic_lookup \
+    >> "$obj/dlls/lsteamclient/aio-build.log" 2>&1 || die "lsteamclient.so did not link: see $obj/dlls/lsteamclient/aio-build.log"
+  [ "$(stat -f %z "$out")" -gt 1000000 ] || die "lsteamclient.so is too small: its objects were dropped"
+  cp "$out" "$engine/lib/wine/x86_64-unix/lsteamclient.so"
+}
+
+# build_steam_exe: steam/steam.c, the stand-in for Steam's Windows client
+# that GAME=BO2_SP starts the campaign under.
+build_steam_exe() {
+  mkdir -p "$engine/share/steam"
+  x86_64-w64-mingw32-gcc -municode -mwindows -O2 -s -o "$engine/share/steam/steam.exe" "$root/steam/steam.c" \
+    -ladvapi32 -lshell32 || die "steam.exe did not build"
+}
+
 # finish_engine <deps>: no debug information (it names the builder's
 # folders), the deps rpath (for the build tools only) dropped, every Mach-O
 # file signed; refuses an engine that still names the builder's home.
@@ -232,11 +311,14 @@ build() {
     if has wine; then apply_series wine "$tree"; fi
     if has dxvk; then apply_series dxvk "$tree"; fi
   fi
+  if has wine; then lsteamclient_sources "$tree/wine"; fi
   deps=$(engine_deps)
 
   if has wine; then
     echo "building wine (about an hour the first time; log: $obj/wine/make.log)"
     build_engine "$tree/wine" "$obj/wine" "$deps"
+    build_lsteamclient_unix "$tree/wine" "$obj/wine"
+    build_steam_exe
   fi
   [ -d "$engine" ] || die "no engine yet: run a build with the wine part first"
   if has legacy; then
@@ -245,6 +327,7 @@ build() {
     rm -rf "$legacy"; mkdir -p "$legacy"
     cp "$root"/patches/wine/0*.patch "$legacy/"
     cp "$root"/build/legacy/0002-*.patch "$legacy/"
+    rm -f "$legacy"/0025-*.patch  # dlls/lsteamclient: not in this tree, not needed for ntdll.so
     apply_series wine "$b/legacy-tree" "$legacy"
     build_legacy_ntdll "$b/legacy-tree/wine" "$obj/wine-legacy"
     cp "$obj/wine-legacy/dlls/ntdll/ntdll.so" "$engine/lib/wine/x86_64-unix/ntdll.so.legacy"

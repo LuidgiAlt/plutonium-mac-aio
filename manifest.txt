@@ -5,6 +5,13 @@ crossover-sources-26.3.0.tar.gz https://media.codeweavers.com/pub/crossover/sour
 dxmt-v0.80-builtin.tar.gz https://github.com/3Shain/dxmt/releases/download/v0.80/dxmt-v0.80-builtin.tar.gz 8f260e36b5739e68f3bad613381441385c4dc7b85b78ba8de653d5a6a264529d
 MoltenVK-macos.tar https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-macos.tar f95765a6229cb7b915990a2890ce12ebe36a730b021545d3d52ae69ce4c4024e
 plutonium.exe https://cdn.plutonium.pw/updater/plutonium.exe -
+# Proton's lsteamclient for the engine (build/build.sh). Not the archive's
+# SHA-256: GitHub regenerates it, so this pins a digest over the files of its
+# lsteamclient/ folder (build/build.sh tree_digest).
+proton-lsteamclient.tar.gz https://codeload.github.com/ValveSoftware/Proton/tar.gz/164e0ccd2ea2b1ec2e5d08dc97f65b184c2539ca b286df1df46a70d9e2cc674676afcc6e08b1a56ce472e5add0932b86940657bf
+# Valve's Steam client files for GAME=BO2_SP: setup.sh takes the Windows
+# steamclient.dll (legacycompat/) out of this package of the Linux client.
+steam-bins-misc.zip https://client-update.akamai.steamstatic.com/bins_misc_ubuntu12.zip.3f92810725ee673827371a0470cd4f8c7ea8cfae 026b984726c728bbf81ae3ba16623bcd96e2bf837a859c235acf0ee279d940fd
 # Sikarugir's wrapper template: the runner, and the x86_64 libraries the engine links against.
 Sikarugir-Template.tar.xz https://github.com/Sikarugir-App/Template/releases/download/v1.0/Template-1.0.24.tar.xz 4b5f89eeb9ef139936bdfad33d9b420b05ea4597cb7d63376674f7a8e171321c
 # The engine and test programs of this release (build/build.sh --pack 0.2.0).

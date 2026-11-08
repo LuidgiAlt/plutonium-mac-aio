@@ -8,6 +8,7 @@ options_validate() {
   bad() { echo "bad option: $1=$2" >&2; return 1; }
   case "${NTDLL:-fixed}" in fixed|legacy) ;; *) bad NTDLL "$NTDLL"; return 1 ;; esac
   case "${XAUDIO:-native}" in native|builtin) ;; *) bad XAUDIO "$XAUDIO"; return 1 ;; esac
+  case "${GAME:-}" in ''|BO2_SP) ;; *) bad GAME "$GAME"; return 1 ;; esac
   if [ -n "${MAXFPS:-}" ]; then
     case "$MAXFPS" in ''|*[!0-9]*|0*) bad MAXFPS "$MAXFPS"; return 1 ;; esac
   fi

@@ -1,0 +1,41 @@
+Subject: configure: build dlls/lsteamclient
+Date: 2026-11-08
+Applies to: CrossOver 26.3.0 Wine sources, after 0024
+Files changed: configure, configure.ac
+
+Declares dlls/lsteamclient, the module patch 0024 redirects Valve's
+steamclient.dll to. Its sources are not in this patch: build/build.sh puts
+them in the tree before configure runs (Proton's lsteamclient at a pinned
+commit with the macOS files in steam/lsteamclient/ over it). configure is
+edited by hand next to configure.ac rather than regenerated, so the rest of
+it stays CodeWeavers'.
+
+---
+--- a/configure
++++ b/configure
+@@ -1225,6 +1225,7 @@
+ enable_loadperf
+ enable_localspl
+ enable_localui
++enable_lsteamclient
+ enable_lz32
+ enable_magnification
+ enable_mapi32
+@@ -22864,6 +22865,7 @@
+ wine_fn_config_makefile dlls/localspl/tests enable_tests
+ wine_fn_config_makefile dlls/localui enable_localui
+ wine_fn_config_makefile dlls/localui/tests enable_tests
++wine_fn_config_makefile dlls/lsteamclient enable_lsteamclient
+ wine_fn_config_makefile dlls/lz32 enable_lz32
+ wine_fn_config_makefile dlls/lz32/tests enable_tests
+ wine_fn_config_makefile dlls/lzexpand.dll16 enable_win16
+--- a/configure.ac
++++ b/configure.ac
+@@ -2861,6 +2861,7 @@
+ WINE_CONFIG_MAKEFILE(dlls/localspl/tests)
+ WINE_CONFIG_MAKEFILE(dlls/localui)
+ WINE_CONFIG_MAKEFILE(dlls/localui/tests)
++WINE_CONFIG_MAKEFILE(dlls/lsteamclient)
+ WINE_CONFIG_MAKEFILE(dlls/lz32)
+ WINE_CONFIG_MAKEFILE(dlls/lz32/tests)
+ WINE_CONFIG_MAKEFILE(dlls/lzexpand.dll16)
