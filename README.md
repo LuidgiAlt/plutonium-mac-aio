@@ -38,6 +38,11 @@ nothing else on your Mac is touched: not Steam, not your game files.
 > **This repository is the only official source of plutonium-mac-aio.**
 > There is no website and there never will be. Anything else using this name
 > is not from this project.
+>
+> plutonium-mac-aio is not affiliated with forks or other projects that
+> remove DRM, use cracked game files, or bypass Steam or Plutonium's login.
+> This project never does: it needs your own copy of the games, and the BO2
+> campaign keeps Steam's DRM ([why](#why-steams-drm-stays)).
 
 ## What works
 
