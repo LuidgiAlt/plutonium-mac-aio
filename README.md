@@ -28,6 +28,12 @@ built from source by this project, [Sikarugir](https://github.com/Sikarugir-App/
 wrapper, a Wine prefix and a fresh Plutonium. **No CrossOver licence**, and
 nothing else on your Mac is touched: not Steam, not your game files.
 
+> [!IMPORTANT]
+> **You are on the `beta` branch** (0.2.2-beta.1): everything in the stable
+> version plus the [BO2 campaign](#bo2-campaign) through Steam. Why it is a
+> beta, and how to go back, is explained in the `main` branch's README.
+> Back to the stable version: `git checkout main && ./setup.sh`.
+
 > [!WARNING]
 > **This repository is the only official source of plutonium-mac-aio.**
 > There is no website and there never will be. Anything else using this name

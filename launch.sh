@@ -257,7 +257,11 @@ if [ "${GAME:-}" = BO2_SP ]; then
   cmd=("$WINE" "C:\\Program Files (x86)\\Steam\\steam.exe" "Z:${bo2sp_game//\//\\}\\t6sp.exe")
   if [ "$dry" = 1 ]; then echo "exec ${cmd[*]}"; exit 0; fi
   run_logged "${cmd[@]}"
-  exit $?
+  status=$?
+  # Nothing of the campaign stays in the prefix (Plutonium quits when it
+  # finds Steam's files), also for a switch back to the main branch.
+  steam_clear
+  exit $status
 fi
 steam_clear
 bo1_prepare "$plutonium"

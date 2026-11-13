@@ -14,5 +14,5 @@ proton-lsteamclient.tar.gz https://codeload.github.com/ValveSoftware/Proton/tar.
 steam-bins-misc.zip https://client-update.akamai.steamstatic.com/bins_misc_ubuntu12.zip.3f92810725ee673827371a0470cd4f8c7ea8cfae 026b984726c728bbf81ae3ba16623bcd96e2bf837a859c235acf0ee279d940fd
 # Sikarugir's wrapper template: the runner, and the x86_64 libraries the engine links against.
 Sikarugir-Template.tar.xz https://github.com/Sikarugir-App/Template/releases/download/v1.0/Template-1.0.24.tar.xz 4b5f89eeb9ef139936bdfad33d9b420b05ea4597cb7d63376674f7a8e171321c
-# The engine and test programs of this release (build/build.sh --pack 0.2.0).
-plutonium-mac-aio-engine.tar.xz https://github.com/LuidgiAlt/plutonium-mac-aio/releases/download/v0.2.2/plutonium-mac-aio-engine-0.2.2.tar.xz 635c8fa2cb298f2ccf4932d06e79c9c664632821c3fad2f949adacfcb99b6cf7
+# The engine and test programs of this release (build/build.sh --pack <version>).
+plutonium-mac-aio-engine.tar.xz https://github.com/LuidgiAlt/plutonium-mac-aio/releases/download/v0.2.2-beta.1/plutonium-mac-aio-engine-0.2.2-beta.1.tar.xz 635c8fa2cb298f2ccf4932d06e79c9c664632821c3fad2f949adacfcb99b6cf7

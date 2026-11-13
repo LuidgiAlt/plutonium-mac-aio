@@ -73,6 +73,9 @@ touch "$client/steamclient.dylib"
 if out=$(GAME=BO2_SP AIO_STEAM_RUNNING=0 "$r/launch.sh" 2>&1); then fail "BO2_SP without Steam running succeeded"; fi
 assert_contains "$out" "Start Steam and sign in"
 out=$(GAME=BO2_SP "$r/launch.sh" 2>&1) || fail "BO2_SP launch failed: $out"
+# The dry run stops before the game, so the cleanup after it is checked in
+# the source: it must follow the campaign's run_logged.
+grep -A4 'run_logged "${cmd\[@\]}"' "$r/launch.sh" | grep -q steam_clear || fail "no cleanup after the campaign"
 rr=$(cd "$r" && pwd)
 assert_contains "$out" "put $rr/prefix/steamclient.valve.dll $rr/prefix/drive_c/Program Files (x86)/Steam/steamclient.dll"
 assert_contains "$out" "/Steam/steam.exe"
