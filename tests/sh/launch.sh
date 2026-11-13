@@ -56,6 +56,19 @@ if out=$(NTDLL=foo "$r/launch.sh" 2>&1); then fail "NTDLL=foo accepted"; fi
 assert_contains "$out" "bad option: NTDLL=foo"
 case "$out" in *select*|*"reg add"*) fail "actions ran before the options were checked" ;; esac
 
+# What the beta's BO2 campaign leaves in the prefix is removed before a
+# Plutonium launch: Plutonium's programs quit when they find Steam's files.
+mkdir -p "$r/prefix/drive_c/Program Files (x86)/Steam" "$r/prefix/drive_c/windows/syswow64"
+touch "$r/prefix/drive_c/windows/syswow64/lsteamclient.dll"
+printf '[Software\\\\Valve\\\\Steam\\\\ActiveProcess] 1\n' > "$r/prefix/user.reg"
+rr=$(cd "$r" && pwd)
+out=$("$r/launch.sh" 2>&1) || fail "launch with campaign leftovers failed: $out"
+assert_contains "$out" "rm $rr/prefix/drive_c/Program Files (x86)/Steam $rr/prefix/drive_c/windows/syswow64/lsteamclient.dll"
+assert_contains "$out" 'reg delete HKCU\Software\Valve /f'
+rm -rf "$r/prefix/drive_c/Program Files (x86)/Steam" "$r/prefix/drive_c/windows/syswow64/lsteamclient.dll" "$r/prefix/user.reg"
+out=$("$r/launch.sh" 2>&1) || fail "default launch failed: $out"
+case "$out" in *"rm "*|*"Software\Valve"*) fail "clean prefix: something was removed" ;; esac
+
 # A launch already running (Review Focus 4: two clicks in quick succession).
 mkdir -p "$r/logs/.launch.lock" && echo $$ > "$r/logs/.launch.lock/pid"
 out=$("$r/launch.sh" 2>&1)

@@ -23,3 +23,5 @@ build/tests.log
 *.dxvk-cache
 *_d3d9.log
 build/engine-deps/
+build/lsteamclient-src/
+build/lsteamclient-src.url

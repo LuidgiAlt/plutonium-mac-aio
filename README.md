@@ -38,7 +38,10 @@ nothing else on your Mac is touched: not Steam, not your game files.
 | Game | Multiplayer | Zombies | Campaign | Renderer |
 |---|:---:|:---:|:---:|---|
 | **Black Ops** (T5) | ✅ | ✅ | ✅ | DXVK on MoltenVK |
-| **Black Ops II** (T6) | ✅ | ✅ | ✅ | [DXMT](https://github.com/3Shain/dxmt) (Metal) |
+| **Black Ops II** (T6) | ✅ | ✅ | beta ¹ | [DXMT](https://github.com/3Shain/dxmt) (Metal) |
+
+¹ Plutonium's launcher has no BO2 campaign. A beta adds it, with Steam for
+Mac: see [BO2 campaign (beta)](#bo2-campaign-beta).
 
 Online and offline play, keyboard and mouse (500–1000 Hz mice included) and
 controllers ([see below](#controllers)). Tested on an M1 Pro.
@@ -58,6 +61,80 @@ sessions:
 | BO1 campaign, seconds under 60 FPS | 134 | **2** |
 
 BO1's campaign sound, choppy before, is clean with it.
+
+## BO2 campaign (beta)
+
+Plutonium starts BO2 multiplayer and zombies, but its launcher has no button
+for BO2's campaign: Treyarch ships it as a separate program (`t6sp.exe`)
+that Plutonium does not handle. (BO1 is different: its zombies run in the
+campaign's program, so Plutonium's BO1 entry already has both.) The stable
+version on this branch therefore cannot start the BO2 campaign. The
+[`beta`](https://github.com/LuidgiAlt/plutonium-mac-aio/tree/beta) branch
+can.
+
+### How to get it
+
+You need, on top of the usual [requirements](#requirements):
+
+- [Steam for Mac](https://store.steampowered.com/about/) installed, **open
+  and signed in** with the account that owns Black Ops II, every time you
+  play the campaign. This project does not install Steam.
+- BO2's Windows game files on the Mac, as for Plutonium.
+
+```bash
+git fetch origin
+git checkout beta
+./setup.sh
+GAME=BO2_SP ./launch.sh
+```
+
+`./setup.sh` installs the beta's engine and downloads Valve's
+`steamclient.dll` (below). Plutonium's multiplayer and zombies keep working
+on the beta with `./launch.sh` as usual. To go back to the stable version:
+
+```bash
+git checkout main
+./setup.sh
+```
+
+Your prefix, Plutonium login and game settings stay either way.
+
+### Why it is a beta and not a release
+
+- **It needs Steam for Mac**, open and signed in. Nothing else in this
+  project needs the Steam app.
+- **It downloads a file of Valve's**: setup fetches the Windows
+  `steamclient.dll` from Valve's servers (one 38 MB package of Steam's Linux
+  client, checked by SHA-256). It is Valve's software, not this project's.
+- **A different engine** (0.2.2-beta.1), with two new Wine patches that
+  change how Windows programs load Steam's client library. They only act for
+  the campaign, but they are new.
+- **Little testing so far**: one Mac (M1 Pro). Getting BO2's Windows files
+  with SteamCMD (see the beta's README) is not confirmed yet.
+
+When it has been tested more widely it will move to a normal release.
+
+### Why Steam's DRM stays
+
+`t6sp.exe` is wrapped in Steam's DRM (SteamStub): it only starts when a
+Steam client confirms that the signed-in account owns the game. The beta
+keeps that check. The game asks your own Steam app, which answers for your
+account, the way Proton does on Linux; this project only carries the
+question to the Steam app on your Mac.
+
+Removing the check instead (patching the program, or replacing Steam with
+an emulator) would make Steam unnecessary, and this project will not do it:
+
+- **It is illegal in many countries**, even for a game you bought: laws
+  forbid getting around technical protection measures, and forbid offering
+  tools that do it. For example, section 1201 of the US DMCA, article 6 of
+  the EU's Copyright Directive (2001/29/EC), and section 41.1 of Canada's
+  Copyright Act.
+- **Steam's Subscriber Agreement forbids it.**
+- **It would turn this project into a way to play without owning the game,**
+  and put the repository at risk of being taken down.
+
+(This is a summary, not legal advice.)
 
 ## Requirements
 

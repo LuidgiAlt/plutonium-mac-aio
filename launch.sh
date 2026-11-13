@@ -30,6 +30,7 @@ set_env() { export "$1=$2"; do_reg add 'HKCU\Environment' /v "$1" /d "$2" /f; }
 clear_env() { unset "$1"; do_reg delete 'HKCU\Environment' /v "$1" /f; }
 do_select() { if [ "$dry" = 1 ]; then echo "select $1 $2"; else "runner_select_$1" "$root" "$2"; fi; }
 do_put() { if [ "$dry" = 1 ]; then echo "put $1 $2"; else put "$1" "$2"; fi; }
+do_rm() { if [ "$dry" = 1 ]; then echo "rm $*"; else rm -rf "$@"; fi; }
 
 use_env() {
   aio_env "$root"
@@ -128,6 +129,25 @@ start_target() {
   echo "$plutonium/bin/plutonium-launcher-win32.exe"
 }
 
+# The beta branch's BO2 campaign (GAME=BO2_SP) puts Steam's files and keys in
+# the prefix. Plutonium's programs look for Steam and quit when they find
+# them, so they are removed before a launch: after switching back from the
+# beta, or if a campaign session did not end cleanly.
+steam_clear() {
+  local f staged=()
+  for f in "$WINEPREFIX/drive_c/Program Files (x86)/Steam" "$WINEPREFIX/drive_c/windows/system32/lsteamclient.dll" \
+    "$WINEPREFIX/drive_c/windows/syswow64/lsteamclient.dll"; do
+    [ -e "$f" ] && staged+=("$f")
+  done
+  [ "${#staged[@]}" -eq 0 ] || do_rm "${staged[@]}"
+  if grep -q '^\[Software\\\\Valve' "$WINEPREFIX/user.reg" 2>/dev/null; then do_reg delete 'HKCU\Software\Valve' /f; fi
+  if grep -q '^\[Software\\\\\(Wow6432Node\\\\\)\{0,1\}Valve' "$WINEPREFIX/system.reg" 2>/dev/null; then
+    do_reg delete 'HKLM\Software\Valve' /f
+    do_reg delete 'HKLM\Software\Wow6432Node\Valve' /f
+  fi
+  return 0
+}
+
 # x87_check <log>: say when the x87sidecar ended the game or could not hook
 # Rosetta, and how to play without it.
 x87_check() {
@@ -194,6 +214,7 @@ if [ "$dry" != 1 ]; then
 fi
 export AIO_LOG=$logs/launch.log
 apply_switches
+steam_clear
 bo1_prepare "$plutonium"
 bo2_prepare "$plutonium"
 if [ "${1:-}" = update ]; then PLUTONIUM_START=updater; fi
