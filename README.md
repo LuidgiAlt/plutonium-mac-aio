@@ -2,14 +2,14 @@
 
 # plutonium-mac-aio
 
-**Play [Plutonium](https://plutonium.pw) Black Ops and Black Ops II on Apple Silicon Macs, with free and open-source software only.**
+**Play [Plutonium](https://plutonium.pw) World at War, Black Ops, Black Ops II and Modern Warfare 3 on Apple Silicon Macs, with free and open-source software only.**
 
 [![Release](https://img.shields.io/github/v/release/LuidgiAlt/plutonium-mac-aio?label=release&color=2ea44f)](https://github.com/LuidgiAlt/plutonium-mac-aio/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/LuidgiAlt/plutonium-mac-aio/total?color=2ea44f)](https://github.com/LuidgiAlt/plutonium-mac-aio/releases)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 <br>
 [![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon-000000?logo=apple&logoColor=white)](#requirements)
-[![Games](https://img.shields.io/badge/Plutonium-BO1%20%7C%20BO2-f26b1d)](#what-works)
+[![Games](https://img.shields.io/badge/Plutonium-BO1%20%7C%20BO2%20%7C%20WaW%20%7C%20MW3-f26b1d)](#what-works)
 [![CrossOver](https://img.shields.io/badge/CrossOver-not%20needed-6f42c1)](#how-it-works)
 [![Wine](https://img.shields.io/badge/Wine-CrossOver%2026.3%20source-8b0000?logo=wine&logoColor=white)](#how-it-works)
 
@@ -44,12 +44,18 @@ nothing else on your Mac is touched: not Steam, not your game files.
 |---|:---:|:---:|:---:|---|
 | **Black Ops** (T5) | ✅ | ✅ | ✅ | DXVK on MoltenVK |
 | **Black Ops II** (T6) | ✅ | ✅ | beta ¹ | [DXMT](https://github.com/3Shain/dxmt) (Metal) |
+| **World at War** (T4) | ✅ | ✅ | ✅ | DXVK on MoltenVK |
+| **Modern Warfare 3 Multiplayer** (IW5 MP) | ✅ | No zombies for stock MW3 | Later | DXVK on MoltenVK |
 
 ¹ Plutonium's launcher has no BO2 campaign. A beta adds it, with Steam for
 Mac: see [BO2 campaign (beta)](#bo2-campaign-beta).
 
 Online and offline play, keyboard and mouse (500–1000 Hz mice included) and
 controllers ([see below](#controllers)). Tested on an M1 Pro.
+
+World at War and MW3 do not require any patches other than the BO1 ones. They should run really well, just like BO1.
+
+MW3 can be tricky to get working with Plutonium.
 
 ### Performance
 
@@ -66,6 +72,7 @@ sessions:
 | BO1 campaign, seconds under 60 FPS | 134 | **2** |
 
 BO1's campaign sound, choppy before, is clean with it.
+WaW and MW3 works very well like BO1.
 
 ## BO2 campaign (beta)
 
@@ -118,6 +125,8 @@ Your prefix, Plutonium login and game settings stay either way.
   with SteamCMD (see the beta's README) is not confirmed yet.
 
 When it has been tested more widely it will move to a normal release.
+
+BO1, BO2 (Zombies & Multiplayer), WaW, MW3 from Steam for Mac without Plutonium using AIO will come soon.
 
 ### Why Steam's DRM stays
 
